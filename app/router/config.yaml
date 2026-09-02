@@ -1,0 +1,41 @@
+# Роутинг: task_type -> модель. Простой конфиг, без ML — легко менять
+# без деплоя нового кода (можно вынести в БД позже, если понадобится
+# правка без релиза вообще).
+
+confidence_threshold: 0.7
+fallback_model: gemini-flash  # безопасный дефолт при низкой уверенности
+
+routing_rules:
+  translation:
+    primary: gpt-4o-mini
+    fallback: gemini-flash
+
+  summarization:
+    primary: claude-sonnet
+    fallback: gpt-4o-mini
+
+  rewriting:
+    primary: gpt-4o-mini
+    fallback: gemini-flash
+
+  contract_generation:
+    primary: claude-opus
+    fallback: claude-sonnet
+    require_human_review: true
+
+  data_analysis:
+    primary: gpt-4o
+    fallback: claude-sonnet
+
+  db_query:
+    primary: gemini-flash
+    fallback: gpt-4o-mini
+
+  web_search:
+    primary: gpt-4o
+    fallback: claude-sonnet
+    web_search: true
+
+  general_qa:
+    primary: gemini-flash
+    fallback: gpt-4o-mini

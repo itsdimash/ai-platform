@@ -1,0 +1,54 @@
+# Whitelist для db_query. Полная версия (26 таблиц ERP, все роли,
+# row-level предикаты) была собрана отдельно Claude Code по вашей БД —
+# здесь стартовый набор из нескольких таблиц, чтобы валидатор было на чём
+# протестировать и от чего оттолкнуться при переносе полного списка.
+
+version: 1
+
+defaults:
+  statement_types: [SELECT]
+  max_rows: 1000
+  deny_functions: [pg_read_file, pg_sleep, dblink, lo_import, lo_export]
+  deny_schemas: [pg_catalog, information_schema]
+
+tables:
+  warehouse_stocks:
+    roles: [warehouse, pm, commercial_director, admin]
+    columns: [id, product_id, warehouse_id, actual_quantity, reserved_quantity, defective_quantity]
+
+  warehouses:
+    roles: [warehouse, pm, commercial_director, accountant, admin]
+    columns: [id, name, code]
+
+  products:
+    roles: [pm, warehouse, commercial_director, accountant, admin]
+    columns: [id, name, unit, category_id, price, created_at]
+
+  projects:
+    roles: [pm, commercial_director, accountant, admin]
+    columns: [id, name, invoice_id, client_id, status_id, pm_id, planned_margin, deadline, created_at]
+    row_level:
+      pm: "projects.pm_id = :current_user_id"
+
+  project_items:
+    roles: [pm, commercial_director, admin, warehouse]
+    columns: [id, project_id, product_id, supplier_id, required_quantity,
+              reserved_from_stock_quantity, status_id, created_at,
+              cost_price, sale_price, total_sum]
+    column_roles:
+      cost_price: [commercial_director, admin]
+      sale_price: [commercial_director, admin]
+      total_sum: [commercial_director, admin]
+    row_level:
+      pm: "project_items.project_id IN (SELECT id FROM projects WHERE pm_id = :current_user_id)"
+
+  suppliers:
+    roles: [pm, commercial_director, accountant, admin]
+    columns: [id, supplier_name, supplier_url, created_at]
+
+blocked_tables:
+  - alembic_version
+  - parse_jobs
+  - notifications
+  - notes
+  - users
