@@ -20,6 +20,20 @@ class OpenAIAdapter(ModelAdapter):
         web_search: bool = False,
         max_tokens: int = 2048,
     ) -> GenerationResult:
+        if web_search:
+            return await self._generate_with_web_search(prompt, system=system, max_tokens=max_tokens)
+        return await self._generate_chat_completion(
+            prompt, system=system, json_mode=json_mode, max_tokens=max_tokens
+        )
+
+    async def _generate_chat_completion(
+        self,
+        prompt: str,
+        *,
+        system: str | None,
+        json_mode: bool,
+        max_tokens: int,
+    ) -> GenerationResult:
         started = time.monotonic()
 
         messages = []
@@ -34,12 +48,6 @@ class OpenAIAdapter(ModelAdapter):
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
-        if web_search:
-            # Responses API поддерживает server-side web_search tool.
-            # Для chat.completions это потребует отдельного вызова через
-            # client.responses.create — оставлено как явный TODO, чтобы не
-            # маскировать разницу в API под одинаковым вызовом.
-            kwargs["tools"] = [{"type": "web_search"}]
 
         response = await self.client.chat.completions.create(**kwargs)
         latency_ms = int((time.monotonic() - started) * 1000)
@@ -49,6 +57,44 @@ class OpenAIAdapter(ModelAdapter):
             text=choice.content or "",
             tokens_in=response.usage.prompt_tokens,
             tokens_out=response.usage.completion_tokens,
+            latency_ms=latency_ms,
+            raw={"id": response.id, "model": response.model},
+        )
+
+    async def _generate_with_web_search(
+        self,
+        prompt: str,
+        *,
+        system: str | None,
+        max_tokens: int,
+    ) -> GenerationResult:
+        """Веб-поиск доступен только через Responses API (client.responses.create),
+        не через Chat Completions — tools=[{"type": "web_search"}] в
+        chat.completions.create не поддерживается и будет отклонён API.
+        Chat Completions поддерживает поиск лишь косвенно, через отдельные
+        модели gpt-4o-search-preview/gpt-4o-mini-search-preview с параметром
+        web_search_options, что не подходит для произвольной модели вроде
+        обычного gpt-4o, используемого в router/config.yaml."""
+
+        started = time.monotonic()
+
+        input_items = []
+        if system:
+            input_items.append({"role": "developer", "content": system})
+        input_items.append({"role": "user", "content": prompt})
+
+        response = await self.client.responses.create(
+            model=self.model,
+            input=input_items,
+            tools=[{"type": "web_search"}],
+            max_output_tokens=max_tokens,
+        )
+        latency_ms = int((time.monotonic() - started) * 1000)
+
+        return GenerationResult(
+            text=response.output_text or "",
+            tokens_in=response.usage.input_tokens,
+            tokens_out=response.usage.output_tokens,
             latency_ms=latency_ms,
             raw={"id": response.id, "model": response.model},
         )
