@@ -7,17 +7,19 @@ from .base import GenerationResult, ModelAdapter
 
 
 class GeminiAdapter(ModelAdapter):
-    def __init__(self, api_key: str, model: str = "gemini-3.6-flash", thinking_level: str = "low"):
+    def __init__(self, api_key: str, model: str = "gemini-3.6-flash", thinking_level: str = "minimal"):
         self.name = model
         self.client = genai.Client(api_key=api_key)
         self.model = model
         # Gemini 3.x модели по умолчанию используют thinking_level="medium",
-        # что тратит скрытые токены рассуждений на весь max_output_tokens
-        # бюджет — на простых задачах (классификация, генерация SQL) это
-        # съедает бюджет без пользы и может обрезать видимый ответ раньше
-        # времени. "low" — минимизирует это, не отключая thinking совсем
-        # (Gemini 3 Flash не поддерживает полное отключение, в отличие от
-        # gemini-2.5-flash, где был thinking_budget=0).
+        # что тратит скрытые токены рассуждений даже на тривиальные задачи
+        # (замерено: 427 thinking-токенов против 12 видимых на простую
+        # генерацию SQL). "minimal" — самый строгий уровень для Flash-моделей,
+        # даёт нулевой расход на рассуждения (thoughts_token_count=None)
+        # без потери качества на структурированных задачах вроде
+        # классификации и генерации SQL. На задержку ответа это не всегда
+        # влияет — судя по наблюдениям, узкое место скорее в лимитах/
+        # нагрузке на стороне Gemini API, не в коде.
         self.thinking_level = thinking_level
 
     async def generate(
