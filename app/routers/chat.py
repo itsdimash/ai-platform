@@ -156,7 +156,7 @@ async def _handle_db_query(
         f"используя ТОЛЬКО перечисленные выше таблицы и колонки. "
         f"Верни ТОЛЬКО SQL, без пояснений, без markdown.\n\nВопрос: {prompt}"
     )
-    result = await adapter.generate(prompt=sql_prompt, max_tokens=500)
+    result = await adapter.generate(prompt=sql_prompt, max_tokens=1500)
     generated_sql = _extract_sql(result.text)
 
     async with ErpReadonlySessionLocal() as erp_session:
