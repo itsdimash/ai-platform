@@ -3,22 +3,32 @@ services:
     build: .
     env_file: .env
     ports:
-      - "8001:8000"
+      - "127.0.0.1:8001:8000"  # наружу — только через nginx, не напрямую в интернет
     restart: unless-stopped
     depends_on:
       - ai-platform-db
+    networks:
+      - default
+      - erp_network  # доступ к БД ERP по DNS-имени сервиса "postgres"
 
   ai-platform-db:
     image: postgres:16
     environment:
       POSTGRES_USER: ai_platform
-      POSTGRES_PASSWORD: password
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
       POSTGRES_DB: ai_platform
     volumes:
       - ai_platform_data:/var/lib/postgresql/data
     ports:
-      - "5433:5432"
+      - "127.0.0.1:5433:5432"  # доступен только с самого сервера, не из интернета
     restart: unless-stopped
 
 volumes:
   ai_platform_data:
+
+networks:
+  default:
+    name: ai-platform_default
+  erp_network:
+    external: true
+    name: erp-backend_default

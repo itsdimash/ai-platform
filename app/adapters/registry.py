@@ -12,10 +12,10 @@ MODEL_FACTORY = {
     "gpt-4o-mini": lambda s: OpenAIAdapter(s.openai_api_key, "gpt-4o-mini"),
     "gpt-4o": lambda s: OpenAIAdapter(s.openai_api_key, "gpt-4o"),
     "claude-haiku": lambda s: AnthropicAdapter(s.anthropic_api_key, "claude-haiku-4-5-20251001"),
-    "claude-sonnet": lambda s: AnthropicAdapter(s.anthropic_api_key, "claude-sonnet-4-6"),
+    "claude-sonnet": lambda s: AnthropicAdapter(s.anthropic_api_key, "claude-sonnet-5"),
     "claude-opus": lambda s: AnthropicAdapter(s.anthropic_api_key, "claude-opus-5"),
-    "gemini-flash": lambda s: GeminiAdapter(s.gemini_api_key, "gemini-2.5-flash"),
-    "gemini-pro": lambda s: GeminiAdapter(s.gemini_api_key, "gemini-2.5-pro"),
+    "gemini-flash": lambda s: GeminiAdapter(s.gemini_api_key, "gemini-3.6-flash"),
+    "gemini-pro": lambda s: GeminiAdapter(s.gemini_api_key, "gemini-3.1-pro-preview"),
 }
 
 
