@@ -6,7 +6,7 @@ from .base import GenerationResult, ModelAdapter
 
 
 class AnthropicAdapter(ModelAdapter):
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-6"):
+    def __init__(self, api_key: str, model: str = "claude-sonnet-5"):
         self.name = model
         self.client = AsyncAnthropic(api_key=api_key)
         self.model = model
