@@ -3,7 +3,7 @@ import time
 from google import genai
 from google.genai import types
 
-from .base import GenerationResult, ModelAdapter
+from .base import Attachment, GenerationResult, ModelAdapter
 
 
 class GeminiAdapter(ModelAdapter):
@@ -30,6 +30,7 @@ class GeminiAdapter(ModelAdapter):
         json_mode: bool = False,
         web_search: bool = False,
         max_tokens: int = 2048,
+        attachments: list[Attachment] | None = None,
     ) -> GenerationResult:
         started = time.monotonic()
 
@@ -46,16 +47,36 @@ class GeminiAdapter(ModelAdapter):
 
         response = await self.client.aio.models.generate_content(
             model=self.model,
-            contents=prompt,
+            contents=self._build_contents(prompt, attachments),
             config=types.GenerateContentConfig(**config_kwargs),
         )
         latency_ms = int((time.monotonic() - started) * 1000)
 
         usage = response.usage_metadata
+        # usage_metadata может быть None (например, если Gemini прервала
+        # генерацию до подсчёта метрик — пустой/заблокированный ответ).
+        # prompt_token_count уже включает токены изображений и страниц PDF
+        # (inline_data) при наличии usage — отдельного пересчёта не требуется.
+        tokens_in = usage.prompt_token_count or 0 if usage else 0
+        tokens_out = usage.candidates_token_count or 0 if usage else 0
+
         return GenerationResult(
             text=response.text or "",
-            tokens_in=usage.prompt_token_count or 0,
-            tokens_out=usage.candidates_token_count or 0,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
             latency_ms=latency_ms,
             raw={"model": self.model},
         )
+
+    @staticmethod
+    def _build_contents(prompt: str, attachments: list[Attachment] | None):
+        """Без вложений — строка (как раньше). С вложениями — список Part:
+        изображения / PDF идут как inline-байты, текст промпта — последним."""
+        if not attachments:
+            return prompt
+
+        parts = [
+            types.Part.from_bytes(data=att.data, mime_type=att.mime_type) for att in attachments
+        ]
+        parts.append(types.Part.from_text(text=prompt))
+        return parts

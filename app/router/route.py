@@ -52,3 +52,12 @@ class Router:
             require_human_review=rule.get("require_human_review", False),
             used_fallback_confidence=False,
         )
+
+    def rule_for(self, task_type: str) -> dict:
+        """Флаги (web_search, require_human_review) для task_type, без выбора
+        модели. Нужен, когда модель выбирает не роутер, а сам пользователь
+        (см. ChatRequest.model в chat.py) — флаги задачи при этом всё равно
+        должны применяться (например, включить web_search для выбранной
+        пользователем модели, если задача классифицирована как web_search).
+        """
+        return self._config["routing_rules"].get(task_type, {})
