@@ -64,7 +64,8 @@ class SQLValidator:
         tables = self._extract_tables(tree)
         self._check_tables_allowed(tables, role)
         self._check_functions(tree)
-        self._expand_and_check_columns(tree, tables, role)
+        alias_map = self._build_alias_map(tree)
+        self._expand_and_check_columns(tree, tables, alias_map, role)
         self._inject_row_level(tree, tables, role, user_id)
         self._enforce_limit(tree)
 
@@ -77,6 +78,32 @@ class SQLValidator:
         if not tables:
             raise SQLValidationError("Не удалось определить таблицы запроса.")
         return tables
+
+    def _build_alias_map(self, tree: exp.Select) -> dict[str, str]:
+        """Отображение "квалификатор -> реальное имя таблицы" из FROM/JOIN.
+
+        sqlglot различает exp.Table.name (настоящее имя таблицы) и
+        exp.Table.alias (алиас, если он есть, иначе пустая строка) — это
+        структурная информация из уже распарсенного AST, а не догадка, так
+        что она согласуется с философией "не угадывать": мы используем то,
+        что sqlglot уже однозначно определил при разборе синтаксиса.
+
+        Каждой таблице сопоставляем И алиас (если есть), И настоящее имя —
+        так запросы без алиасов (table.column) продолжают работать как
+        раньше. Если один и тот же квалификатор смотрит на две разные
+        таблицы — это может произойти только в невалидном/подозрительном
+        SQL, поэтому REJECT вместо выбора одной из них.
+        """
+        alias_map: dict[str, str] = {}
+        for table_expr in tree.find_all(exp.Table):
+            real_name = table_expr.name
+            for qualifier in filter(None, [table_expr.alias, real_name]):
+                if qualifier in alias_map and alias_map[qualifier] != real_name:
+                    raise SQLValidationError(
+                        f"Неоднозначный алиас '{qualifier}' в запросе."
+                    )
+                alias_map[qualifier] = real_name
+        return alias_map
 
     def _check_tables_allowed(self, tables: set[str], role: str) -> None:
         for table in tables:
@@ -96,7 +123,9 @@ class SQLValidator:
             if func_name in {f.lower() for f in deny}:
                 raise SQLValidationError(f"Функция '{func_name}' запрещена.")
 
-    def _expand_and_check_columns(self, tree: exp.Select, tables: set[str], role: str) -> None:
+    def _expand_and_check_columns(
+        self, tree: exp.Select, tables: set[str], alias_map: dict[str, str], role: str
+    ) -> None:
         # SELECT * -> явно раскрываем в разрешённый список колонок.
         # Это самое частое место утечки запрещённого поля — раскрытие
         # обязательно, простого пост-фильтра недостаточно.
@@ -117,13 +146,21 @@ class SQLValidator:
 
         # Явно перечисленные колонки — проверяем каждую по её таблице,
         # если таблица одна (для multi-table запросов требуем квалификацию
-        # table.column, иначе тоже reject, чтобы не гадать).
+        # table.column, иначе тоже reject, чтобы не гадать). Квалификатор
+        # может быть как алиасом (ws), так и настоящим именем таблицы
+        # (warehouse_stocks) — оба случая разрешает alias_map.
         for col in tree.find_all(exp.Column):
             col_name = col.name
-            table_alias = col.table
+            qualifier = col.table
 
-            if table_alias:
-                target_table = table_alias
+            if qualifier:
+                target_table = alias_map.get(qualifier)
+                if target_table is None:
+                    # Квалификатор не соответствует ни одной таблице из
+                    # FROM/JOIN этого запроса — не пытаемся угадать.
+                    raise SQLValidationError(
+                        f"Не удалось сопоставить алиас '{qualifier}' с таблицей в запросе."
+                    )
             elif len(tables) == 1:
                 target_table = next(iter(tables))
             else:
@@ -133,11 +170,7 @@ class SQLValidator:
                 )
 
             if target_table not in tables:
-                # алиас, не совпадающий с именем таблицы — не поддерживаем,
-                # чтобы не терять точность role-проверки
-                raise SQLValidationError(
-                    f"Не удалось сопоставить алиас '{target_table}' с таблицей whitelist."
-                )
+                raise SQLValidationError(f"Таблица '{target_table}' не входит в whitelist.")
 
             allowed_columns = self._allowed_columns_for_role(target_table, role)
             if col_name not in allowed_columns:
