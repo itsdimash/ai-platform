@@ -5,6 +5,18 @@ from google.genai import types
 
 from .base import Attachment, GenerationResult, ModelAdapter
 
+# Допустимые thinking_level различаются по семейству модели: Pro-модели
+# (3.x) принимают только "low"/"high", Flash — весь диапазон, включая
+# "minimal"/"medium". Общий дефолт "minimal" в конструкторе годится только
+# для Flash; если он долетает до Pro-адаптера (например, конфиг для
+# gemini-pro не переопределил thinking_level), API отвечает 400
+# INVALID_ARGUMENT. Поэтому уровень клэмпится по семейству модели здесь,
+# а не полагается на то, что вызывающий код (deps.py/config.yaml) всегда
+# передаст валидное значение явно.
+_PRO_VALID_LEVELS = {"low", "high"}
+_FLASH_VALID_LEVELS = {"minimal", "low", "medium", "high"}
+_PRO_FALLBACK_LEVEL = "low"
+
 
 class GeminiAdapter(ModelAdapter):
     def __init__(self, api_key: str, model: str = "gemini-3.6-flash", thinking_level: str = "minimal"):
@@ -20,7 +32,18 @@ class GeminiAdapter(ModelAdapter):
         # классификации и генерации SQL. На задержку ответа это не всегда
         # влияет — судя по наблюдениям, узкое место скорее в лимитах/
         # нагрузке на стороне Gemini API, не в коде.
-        self.thinking_level = thinking_level
+        self.thinking_level = self._resolve_thinking_level(model, thinking_level)
+
+    @staticmethod
+    def _resolve_thinking_level(model: str, requested_level: str) -> str:
+        is_pro = "pro" in model.lower()
+        valid_levels = _PRO_VALID_LEVELS if is_pro else _FLASH_VALID_LEVELS
+        if requested_level.lower() in valid_levels:
+            return requested_level.lower()
+        # Запрошенный уровень не поддерживается этим семейством моделей
+        # (типичный случай — "minimal"/"medium" на Pro) — берём безопасный
+        # дефолт вместо падения на первом же запросе к API.
+        return _PRO_FALLBACK_LEVEL if is_pro else requested_level.lower()
 
     async def generate(
         self,
@@ -45,11 +68,25 @@ class GeminiAdapter(ModelAdapter):
         if web_search:
             config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
 
-        response = await self.client.aio.models.generate_content(
-            model=self.model,
-            contents=self._build_contents(prompt, attachments),
-            config=types.GenerateContentConfig(**config_kwargs),
-        )
+        try:
+            response = await self.client.aio.models.generate_content(
+                model=self.model,
+                contents=self._build_contents(prompt, attachments),
+                config=types.GenerateContentConfig(**config_kwargs),
+            )
+        except Exception as e:  # noqa: BLE001
+            # Защитный фолбэк: если API всё же отклонил thinking_level (Google
+            # поменял допустимые значения для этой модели уже после клэмпа
+            # в __init__) — не роняем запрос, а повторяем без thinking_config
+            # вообще. Ретраим только на эту конкретную ошибку, а не на любую.
+            if "thinking level" not in str(e).lower() and "INVALID_ARGUMENT" not in str(e):
+                raise
+            config_kwargs.pop("thinking_config", None)
+            response = await self.client.aio.models.generate_content(
+                model=self.model,
+                contents=self._build_contents(prompt, attachments),
+                config=types.GenerateContentConfig(**config_kwargs),
+            )
         latency_ms = int((time.monotonic() - started) * 1000)
 
         usage = response.usage_metadata
