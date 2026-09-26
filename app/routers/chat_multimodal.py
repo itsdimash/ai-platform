@@ -40,6 +40,7 @@ from ..classifier.classify import Classification, classify
 from ..db.session import get_db
 from ..models.chat import ChatMessage
 from ..models.logs import AIRequestLog
+from ..system_prompt import SYSTEM_PROMPT
 from .chat import (
     _build_contextual_prompt,
     _get_or_create_session,
@@ -64,7 +65,8 @@ MAX_TOTAL_ATTACHMENT_BYTES = 15 * 1024 * 1024  # суммарно по всем 
 ANTHROPIC_INLINE_PDF_MAX_BYTES = 32 * 1024 * 1024
 GEMINI_INLINE_REQUEST_MAX_BYTES = 20 * 1024 * 1024
 
-MAX_EXTRACTED_PDF_CHARS = 20_000  # как в document_extract.py — не взрываем бюджет токенов
+MAX_EXTRACTED_PDF_CHARS = 60_000  # поднято с 20_000 — модели легко тянут больше контекста,
+# прежнее значение резало содержимое многостраничных PDF без явного предупреждения в UI
 
 # Эвристика «скан / сложная вёрстка»: если текстовый слой даёт меньше
 # символов на страницу, чем этот порог, — PDF почти наверняка скан или
@@ -161,12 +163,12 @@ async def _read_and_validate(
                     status.HTTP_400_BAD_REQUEST,
                     detail=f"Изображение {name!r} больше 5 МБ",
                 )
-            images.append(_ParsedFile(name, raw, mime))
-            if len(images) > MAX_IMAGES_PER_MESSAGE:
+            if len(images) >= MAX_IMAGES_PER_MESSAGE:
                 raise HTTPException(
                     status.HTTP_400_BAD_REQUEST,
                     detail="Не больше 4 изображений в одном сообщении",
                 )
+            images.append(_ParsedFile(name, raw, mime))
 
     return images, pdfs
 
@@ -229,6 +231,7 @@ async def chat_multimodal(
         confidence = 0.0
         used_fallback_confidence = False
         web_search = False
+        max_tokens = _route_engine.default_max_tokens
     else:
         contextual_for_classify = _build_contextual_prompt(history_messages, prompt)
         try:
@@ -244,11 +247,13 @@ async def chat_multimodal(
             model_name = body_model
             web_search = rule.get("web_search", False)
             used_fallback_confidence = False
+            max_tokens = rule.get("max_tokens", _route_engine.default_max_tokens)
         else:
             decision = _route_engine.decide(task_type, confidence)
             model_name = decision.model
             web_search = decision.web_search
             used_fallback_confidence = decision.used_fallback_confidence
+            max_tokens = decision.max_tokens
 
     if model_name not in adapters:
         _latency = int((time.monotonic() - started) * 1000)
@@ -320,8 +325,9 @@ async def chat_multimodal(
     try:
         result = await adapters[model_name].generate(
             prompt=contextual_prompt,
+            system=SYSTEM_PROMPT,
             web_search=web_search,
-            max_tokens=2048,
+            max_tokens=max_tokens,
             attachments=attachments or None,
         )
         text_out = result.text

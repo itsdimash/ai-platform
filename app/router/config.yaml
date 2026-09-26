@@ -5,37 +5,52 @@
 confidence_threshold: 0.7
 fallback_model: gemini-flash  # безопасный дефолт при низкой уверенности
 
+# ДОБАВЛЕНО: раньше max_tokens=2048 был жёстко зашит в коде (routers/chat.py
+# и routers/chat_multimodal.py) и применялся ОДИНАКОВО ко всем задачам —
+# и к короткому general_qa, и к генерации договора или презентации, которым
+# 2048 токенов (~1500 слов) может не хватить и результат обрежется
+# на середине. Теперь лимит настраивается здесь, по типу задачи.
+default_max_tokens: 2048
+
 routing_rules:
   translation:
     primary: gpt-4o-mini
     fallback: gemini-flash
+    max_tokens: 2048
 
   summarization:
     primary: claude-sonnet
     fallback: gpt-4o-mini
+    max_tokens: 2048
 
   rewriting:
     primary: gpt-4o-mini
     fallback: gemini-flash
+    max_tokens: 2048
 
   contract_generation:
     primary: claude-opus
     fallback: claude-sonnet
     require_human_review: true
+    max_tokens: 8000
 
   data_analysis:
     primary: gpt-4o
     fallback: claude-sonnet
+    max_tokens: 4096
 
   db_query:
     primary: gemini-flash
     fallback: gpt-4o-mini
+    max_tokens: 1500
 
   web_search:
     primary: gpt-4o
     fallback: claude-sonnet
     web_search: true
+    max_tokens: 3072
 
   general_qa:
     primary: gemini-flash
     fallback: gpt-4o-mini
+    max_tokens: 2048

@@ -1,19 +1,3 @@
-"""Извлечение текста из загруженного документа для подстановки в промпт чата.
-
-Намеренно ИЗОЛИРОВАННЫЙ роут — не трогает /v1/chat, классификатор,
-YAML-роутер или ChatRequest/ChatResponse. Фронтенд сначала вызывает
-POST /v1/documents/extract, получает обратно текст, сам приклеивает его
-к началу prompt пользователя и уже этот составной prompt отправляет
-обычным вызовом POST /v1/chat. Контракт существующего чата не меняется.
-
-Ничего не пишет на диск и в БД — файл живёт только в памяти на время
-запроса (в отличие от app/routers/parser.py в ERP_Bakend, которому
-нужна персистентность для Celery-обработки — здесь она не нужна).
-
-Библиотеки — те же, что уже используются в
-app/services/procurement_parser/ (python-docx, pdfplumber, openpyxl),
-дополнительных зависимостей не требуется.
-"""
 from __future__ import annotations
 
 import io
@@ -21,17 +5,18 @@ import io
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 
 from app.auth import CurrentUser, get_current_user
+from app.utils.r2 import upload_file_to_r2
 
 router = APIRouter(prefix="/v1/documents", tags=["documents"])
 
-MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024  # 15 МБ — с запасом для PDF со сканами
-MAX_EXTRACTED_CHARS = 20_000  # чтобы не взорвать бюджет токенов промпта
-
+MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024
+MAX_EXTRACTED_CHARS = 60_000  # поднято с 20_000 — резало длинные договоры/отчёты
+# задолго до реальных лимитов контекста моделей
 SUPPORTED_EXTENSIONS = {".docx", ".pdf", ".xlsx"}
 
 
 def _extract_docx(content: bytes) -> str:
-    import docx  # python-docx; lazy import, как в word_extractor.py
+    import docx
 
     document = docx.Document(io.BytesIO(content))
     parts = [p.text for p in document.paragraphs if p.text.strip()]
@@ -79,7 +64,6 @@ async def extract_document_text(
     file: UploadFile = File(...),
     user: CurrentUser = Depends(get_current_user),
 ) -> dict:
-    """Извлечь текст из документа. Ничего не сохраняет — только текст в ответе."""
     if not file.filename:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Имя файла отсутствует")
 
@@ -93,6 +77,14 @@ async def extract_document_text(
     content = await file.read()
     if len(content) > MAX_FILE_SIZE_BYTES:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Файл слишком большой (лимит 15 МБ)")
+
+    content_type = file.content_type or "application/octet-stream"
+    file_url = upload_file_to_r2(
+        file_bytes=content,
+        original_filename=file.filename,
+        content_type=content_type,
+        folder="documents",
+    )
 
     try:
         text = EXTRACTORS[suffix](content)
@@ -111,4 +103,5 @@ async def extract_document_text(
         "text": text,
         "truncated": truncated,
         "char_count": len(text),
+        "file_url": file_url,
     }

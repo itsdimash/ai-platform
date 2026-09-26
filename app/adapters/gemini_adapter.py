@@ -1,37 +1,32 @@
 import time
+from typing import Any
 
 from google import genai
 from google.genai import types
 
-from .base import Attachment, GenerationResult, ModelAdapter
+from app.utils.docx_builder import create_document_file
+from app.utils.image_builder import generate_and_save_image
+from app.utils.pptx_builder import create_presentation_file
+from app.utils.xlsx_builder import create_spreadsheet_file
+from .base import ALL_TOOLS, Attachment, GenerationResult, ModelAdapter
 
-# Допустимые thinking_level различаются по семейству модели: Pro-модели
-# (3.x) принимают только "low"/"high", Flash — весь диапазон, включая
-# "minimal"/"medium". Общий дефолт "minimal" в конструкторе годится только
-# для Flash; если он долетает до Pro-адаптера (например, конфиг для
-# gemini-pro не переопределил thinking_level), API отвечает 400
-# INVALID_ARGUMENT. Поэтому уровень клэмпится по семейству модели здесь,
-# а не полагается на то, что вызывающий код (deps.py/config.yaml) всегда
-# передаст валидное значение явно.
 _PRO_VALID_LEVELS = {"low", "high"}
 _FLASH_VALID_LEVELS = {"minimal", "low", "medium", "high"}
 _PRO_FALLBACK_LEVEL = "low"
 
 
 class GeminiAdapter(ModelAdapter):
-    def __init__(self, api_key: str, model: str = "gemini-3.6-flash", thinking_level: str = "minimal"):
+    def __init__(
+        self,
+        api_key: str,
+        openai_api_key: str | None = None,
+        model: str = "gemini-3.6-flash",
+        thinking_level: str = "minimal",
+    ):
         self.name = model
         self.client = genai.Client(api_key=api_key)
+        self.openai_api_key = openai_api_key or api_key
         self.model = model
-        # Gemini 3.x модели по умолчанию используют thinking_level="medium",
-        # что тратит скрытые токены рассуждений даже на тривиальные задачи
-        # (замерено: 427 thinking-токенов против 12 видимых на простую
-        # генерацию SQL). "minimal" — самый строгий уровень для Flash-моделей,
-        # даёт нулевой расход на рассуждения (thoughts_token_count=None)
-        # без потери качества на структурированных задачах вроде
-        # классификации и генерации SQL. На задержку ответа это не всегда
-        # влияет — судя по наблюдениям, узкое место скорее в лимитах/
-        # нагрузке на стороне Gemini API, не в коде.
         self.thinking_level = self._resolve_thinking_level(model, thinking_level)
 
     @staticmethod
@@ -40,9 +35,6 @@ class GeminiAdapter(ModelAdapter):
         valid_levels = _PRO_VALID_LEVELS if is_pro else _FLASH_VALID_LEVELS
         if requested_level.lower() in valid_levels:
             return requested_level.lower()
-        # Запрошенный уровень не поддерживается этим семейством моделей
-        # (типичный случай — "minimal"/"medium" на Pro) — берём безопасный
-        # дефолт вместо падения на первом же запросе к API.
         return _PRO_FALLBACK_LEVEL if is_pro else requested_level.lower()
 
     async def generate(
@@ -54,51 +46,107 @@ class GeminiAdapter(ModelAdapter):
         web_search: bool = False,
         max_tokens: int = 2048,
         attachments: list[Attachment] | None = None,
+        tools: list[dict[str, Any]] | None = None,
     ) -> GenerationResult:
         started = time.monotonic()
+
+        tool_list = []
+        if web_search:
+            tool_list.append(types.Tool(google_search=types.GoogleSearch()))
+
+        active_tools = tools if tools is not None else ALL_TOOLS
+        if active_tools:
+            func_decls = [
+                types.FunctionDeclaration(
+                    name=t["name"],
+                    description=t["description"],
+                    parameters=t["parameters"],
+                )
+                for t in active_tools
+            ]
+            tool_list.append(types.Tool(function_declarations=func_decls))
 
         config_kwargs: dict = {
             "max_output_tokens": max_tokens,
             "thinking_config": types.ThinkingConfig(thinking_level=self.thinking_level),
         }
+        # ВАЖНО: "tools" добавляется в конфиг, ТОЛЬКО если там реально что-то
+        # есть. Gemini жёстко запрещает связку response_mime_type=
+        # "application/json" (json_mode, см. ниже) с любыми tools/function
+        # declarations в одном запросе — даже с пустым списком деклараций
+        # это может быть отклонено. Раньше "tools" передавался всегда
+        # (пусть даже как пустой), из-за чего json_mode-вызовы (классификатор)
+        # падали на каждом обращении.
+        if tool_list:
+            config_kwargs["tools"] = tool_list
         if system:
             config_kwargs["system_instruction"] = system
         if json_mode:
             config_kwargs["response_mime_type"] = "application/json"
-        if web_search:
-            config_kwargs["tools"] = [types.Tool(google_search=types.GoogleSearch())]
 
-        try:
-            response = await self.client.aio.models.generate_content(
-                model=self.model,
-                contents=self._build_contents(prompt, attachments),
-                config=types.GenerateContentConfig(**config_kwargs),
-            )
-        except Exception as e:  # noqa: BLE001
-            # Защитный фолбэк: если API всё же отклонил thinking_level (Google
-            # поменял допустимые значения для этой модели уже после клэмпа
-            # в __init__) — не роняем запрос, а повторяем без thinking_config
-            # вообще. Ретраим только на эту конкретную ошибку, а не на любую.
-            if "thinking level" not in str(e).lower() and "INVALID_ARGUMENT" not in str(e):
-                raise
-            config_kwargs.pop("thinking_config", None)
-            response = await self.client.aio.models.generate_content(
-                model=self.model,
-                contents=self._build_contents(prompt, attachments),
-                config=types.GenerateContentConfig(**config_kwargs),
-            )
+        response = await self.client.aio.models.generate_content(
+            model=self.model,
+            contents=self._build_contents(prompt, attachments),
+            config=types.GenerateContentConfig(**config_kwargs),
+        )
+
         latency_ms = int((time.monotonic() - started) * 1000)
+        output_text = response.text or ""
+
+        # Обработка вызова функций в Gemini
+        if response.function_calls:
+            for call in response.function_calls:
+                args = call.args or {}
+                if call.name == "generate_presentation":
+                    file_url = create_presentation_file(
+                        title=args.get("title", "Презентация"),
+                        subtitle=args.get("subtitle", ""),
+                        slides_data=args.get("slides", []),
+                    )
+                    output_text = (
+                        f"📊 Готово! Я сформировал презентацию «**{args.get('title')}**».\n\n"
+                        f"[📥 Скачать презентацию (.pptx)]({file_url})"
+                    )
+                elif call.name == "generate_document":
+                    try:
+                        file_url = create_document_file(
+                            title=args.get("title", "Документ"),
+                            sections=args.get("sections", []),
+                        )
+                        output_text = (
+                            f"📄 Готово! Я сформировал документ «**{args.get('title')}**».\n\n"
+                            f"[📥 Скачать документ (.docx)]({file_url})"
+                        )
+                    except Exception as e:
+                        output_text = f"⚠️ Не удалось сформировать документ. Ошибка: {str(e)}"
+                elif call.name == "generate_spreadsheet":
+                    try:
+                        file_url = create_spreadsheet_file(
+                            filename=args.get("filename", "Таблица"),
+                            sheets=args.get("sheets", []),
+                        )
+                        output_text = (
+                            f"📈 Готово! Я сформировал таблицу «**{args.get('filename')}**».\n\n"
+                            f"[📥 Скачать таблицу (.xlsx)]({file_url})"
+                        )
+                    except Exception as e:
+                        output_text = f"⚠️ Не удалось сформировать таблицу. Ошибка: {str(e)}"
+                elif call.name == "generate_image":
+                    try:
+                        img_url = await generate_and_save_image(
+                            prompt=args.get("prompt", prompt),
+                            size=args.get("size", "1024x1024"),
+                        )
+                        output_text = f"🎨 Вот изображение по вашему запросу:\n\n![Сгенерированное изображение]({img_url})"
+                    except Exception as e:
+                        output_text = f"⚠️ Не удалось сгенерировать изображение. Ошибка: {str(e)}"
 
         usage = response.usage_metadata
-        # usage_metadata может быть None (например, если Gemini прервала
-        # генерацию до подсчёта метрик — пустой/заблокированный ответ).
-        # prompt_token_count уже включает токены изображений и страниц PDF
-        # (inline_data) при наличии usage — отдельного пересчёта не требуется.
         tokens_in = usage.prompt_token_count or 0 if usage else 0
         tokens_out = usage.candidates_token_count or 0 if usage else 0
 
         return GenerationResult(
-            text=response.text or "",
+            text=output_text,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             latency_ms=latency_ms,
@@ -107,8 +155,6 @@ class GeminiAdapter(ModelAdapter):
 
     @staticmethod
     def _build_contents(prompt: str, attachments: list[Attachment] | None):
-        """Без вложений — строка (как раньше). С вложениями — список Part:
-        изображения / PDF идут как inline-байты, текст промпта — последним."""
         if not attachments:
             return prompt
 

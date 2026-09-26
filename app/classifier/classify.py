@@ -41,11 +41,22 @@ KNOWN_TASK_TYPES = {
 
 
 async def classify(prompt: str, adapter: ModelAdapter) -> Classification:
+    # ВАЖНО: tools=[] обязателен. Без него generate() по умолчанию цепляет
+    # ALL_TOOLS (presentation/document/spreadsheet/image), а Gemini
+    # (единственный провайдер, который здесь реально используется —
+    # classify() всегда вызывается с adapters["gemini-flash"]) жёстко
+    # запрещает сочетание json_mode + tools одним и тем же запросом:
+    # "Function calling with a response mime type: 'application/json' is
+    # unsupported". Это роняло КАЖДЫЙ вызов классификатора с самого начала,
+    # try/except в chat.py тихо ловил ошибку и подставлял
+    # general_qa/confidence=0.0 — то есть авто-роутинг по task_type
+    # (включая весь путь db_query) по факту никогда не срабатывал.
     result = await adapter.generate(
         prompt=prompt,
         system=CLASSIFIER_SYSTEM_PROMPT,
         json_mode=True,
         max_tokens=200,
+        tools=[],
     )
 
     try:

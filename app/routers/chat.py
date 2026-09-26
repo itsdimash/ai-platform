@@ -16,6 +16,7 @@ from ..db_query.schema_context import build_schema_context
 from ..models.chat import ChatMessage, ChatSession
 from ..models.logs import AIRequestLog
 from ..router.route import RouteDecision, Router
+from ..system_prompt import SYSTEM_PROMPT
 from .deps import get_adapters
 from .schemas import ChatRequest, ChatResponse
 
@@ -73,6 +74,7 @@ async def chat(
             web_search=rule.get("web_search", False),
             require_human_review=rule.get("require_human_review", False),
             used_fallback_confidence=False,
+            max_tokens=rule.get("max_tokens", _route_engine.default_max_tokens),
         )
     else:
         decision = _route_engine.decide(classification.task_type, classification.confidence)
@@ -116,8 +118,9 @@ async def chat(
             adapter = adapters[decision.model]
             result = await adapter.generate(
                 prompt=contextual_prompt,
+                system=SYSTEM_PROMPT,
                 web_search=decision.web_search,
-                max_tokens=2048,
+                max_tokens=decision.max_tokens,
             )
             text_out = result.text
             tokens_in, tokens_out = result.tokens_in, result.tokens_out
