@@ -25,6 +25,8 @@ from reportlab.platypus import (
     TableStyle,
 )
 
+from app.utils.tool_schema import SUMMARY_PROP
+
 _FONTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
 
 PDF_TOOL = {
@@ -39,6 +41,7 @@ PDF_TOOL = {
     "parameters": {
         "type": "object",
         "properties": {
+            "summary": SUMMARY_PROP,
             "title": {
                 "type": "string",
                 "description": "Document title, rendered as the main heading.",
@@ -79,7 +82,7 @@ PDF_TOOL = {
                 },
             },
         },
-        "required": ["title", "sections"],
+        "required": ["title", "sections", "summary"],
     },
 }
 

@@ -53,6 +53,25 @@ def display_name(name: str, default: str = "file") -> str:
     return stem[: max(1, _MAX_DISPLAY_NAME - len(ext))].rstrip() + ext
 
 
+_EXT_BY_MIME = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/webp": ".webp",
+    "application/pdf": ".pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+}
+
+
+def ensure_extension(name: str, mime: str) -> str:
+    """Добавляет расширение по mime, если у имени его нет (вставка из буфера обмена:
+    «clipboard» -> «clipboard.png»), чтобы скачанный файл открывался правильно."""
+    if _split_ext(name)[1]:
+        return name
+    ext = _EXT_BY_MIME.get((mime or "").lower())
+    return f"{name}{ext}" if ext else name
+
+
 def build_key(user_id: int, session_id: int | None, filename: str, *, uploads: bool = False) -> str:
     """ai/{user_id}/{session_id}/[uploads/]{uuid4hex}_{safe_name}.
 

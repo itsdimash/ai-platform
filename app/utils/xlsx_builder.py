@@ -9,6 +9,8 @@ import io
 
 from openpyxl import Workbook
 
+from app.utils.tool_schema import SUMMARY_PROP
+
 SPREADSHEET_TOOL = {
     "name": "generate_spreadsheet",
     "description": (
@@ -21,6 +23,7 @@ SPREADSHEET_TOOL = {
     "parameters": {
         "type": "object",
         "properties": {
+            "summary": SUMMARY_PROP,
             "filename": {
                 "type": "string",
                 "description": "Base filename for the spreadsheet, without extension.",
@@ -50,7 +53,7 @@ SPREADSHEET_TOOL = {
                 },
             },
         },
-        "required": ["filename", "sheets"],
+        "required": ["filename", "sheets", "summary"],
     },
 }
 

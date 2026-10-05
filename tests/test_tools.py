@@ -28,7 +28,11 @@ async def test_presentation_becomes_attachment_with_summary(stored):
             [
                 {
                     "name": "generate_presentation",
-                    "args": {"title": "План", "slides": [{"title": "A", "content": ["x"]}] * 4},
+                    "args": {
+                        "title": "План",
+                        "slides": [{"title": "A", "content": ["x"]}] * 4,
+                        "summary": "Обзор плана на квартал.",
+                    },
                 }
             ]
         ),
@@ -40,7 +44,9 @@ async def test_presentation_becomes_attachment_with_summary(stored):
     assert att["type"] == "file" and att["name"] == "План.pptx" and att["size"] > 0
     assert att["key"].startswith("ai/7/42/") and att["key"].endswith("_План.pptx")
     assert "url" not in att  # url в записи не хранится
-    assert "Презентация «План» — 5 слайдов" in res.text  # 4 + титульный
+    assert (
+        res.text == "📊 Готово! Презентация «План» — 5 слайдов. Обзор плана на квартал."
+    )  # 4 + титульный
     assert "Сейчас создам" not in res.text  # текст модели заменён резюме
     assert stored[0]["key"] == att["key"]
 
@@ -70,14 +76,21 @@ async def test_other_file_tools(stored, name, args, ext, kind):
 
 
 async def test_image_tool_is_image_attachment(stored, monkeypatch):
-    async def fake_image(prompt, size):
-        return b"\x89PNG\r\n\x1a\nfake"
+    async def fake_image(prompt, size=None, quality=None):
+        return b"\x89PNG\r\n\x1a\nfake", "gpt-image-2.5-sunburst"
 
     monkeypatch.setattr(tools, "generate_image_bytes", fake_image)
     res = await apply_tool_calls(
-        _result([{"name": "generate_image", "args": {"prompt": "cat"}}]), ctx=CTX, prompt="p"
+        _result(
+            [{"name": "generate_image", "args": {"prompt": "cat", "caption": "Кот с игрушкой"}}]
+        ),
+        ctx=CTX,
+        prompt="p",
     )
     assert res.attachments[0]["type"] == "image" and res.attachments[0]["mime"] == "image/png"
+    assert res.text == "🎨 Готово: Кот с игрушкой"
+    assert res.image_model == "gpt-image-2.5-sunburst"  # реальный id модели картинок
+    assert res.attachments[0]["name"] == "Кот с игрушкой.png"
 
 
 async def test_no_tool_calls_leaves_result_untouched(stored):
@@ -118,3 +131,32 @@ async def test_storage_failure_raises_tool_execution_error(monkeypatch):
             ctx=CTX,
             prompt="p",
         )
+
+
+def test_reply_templates():
+    from app.tools import clean_line, file_reply, image_reply
+
+    assert file_reply("📄", "Документ", "Записка", "3 раздела", "О переносе склада") == (
+        "📄 Готово! Документ «Записка» — 3 раздела. О переносе склада"
+    )
+    assert (
+        file_reply("📄", "Документ", "Записка", "3 раздела", "")
+        == "📄 Готово! Документ «Записка» — 3 раздела."
+    )
+    assert file_reply("📄", "Документ", "Записка", "3 раздела", None).endswith("3 раздела.")
+    assert image_reply("Кот играет") == "🎨 Готово: Кот играет"
+    assert image_reply("") == "🎨 Готово: изображение создано."
+    assert clean_line("  много\n\nпробелов   и\tтабов ") == "много пробелов и табов"
+    assert len(clean_line("x" * 1000)) == 300
+
+
+async def test_missing_summary_and_caption_do_not_break_replies(stored, monkeypatch):
+    async def fake_image(prompt, size=None, quality=None):
+        return b"\x89PNG\r\n\x1a\nfake", "m"
+
+    monkeypatch.setattr(tools, "generate_image_bytes", fake_image)
+    res = await apply_tool_calls(
+        _result([{"name": "generate_image", "args": {"prompt": "cat"}}]), ctx=CTX, prompt="p"
+    )
+    assert res.text == "🎨 Готово: изображение создано."
+    assert res.attachments[0]["name"] == "image.png"
