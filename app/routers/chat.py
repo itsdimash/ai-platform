@@ -2,6 +2,7 @@ import re
 import time
 from datetime import date, datetime
 from decimal import Decimal
+from typing import NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
@@ -17,6 +18,7 @@ from ..models.chat import ChatMessage, ChatSession
 from ..models.logs import AIRequestLog
 from ..router.route import RouteDecision, Router
 from ..system_prompt import SYSTEM_PROMPT
+from ..tools import ToolExecutionError
 from .deps import get_adapters
 from .schemas import ChatRequest, ChatResponse
 
@@ -81,47 +83,42 @@ async def chat(
     else:
         decision = _route_engine.decide(classification.task_type, classification.confidence)
 
+    session_created = body.session_id is None
+
     # Опечатка/рассинхрон в config.yaml (модель не зарегистрирована в
     # адаптерах) — явная ошибка вместо сырого KeyError глубже в коде.
     if decision.model not in adapters:
-        status = "error"
-        error_message = (
-            f"Модель '{decision.model}' из конфига роутера не зарегистрирована в adapters."
+        await fail_request(
+            db,
+            user_id=user.user_id,
+            session_id=session.id,
+            session_created=session_created,
+            task_type=classification.task_type,
+            confidence=classification.confidence,
+            used_fallback_confidence=decision.used_fallback_confidence,
+            model_used=decision.model,
+            started=started,
+            status_code=500,
+            detail="Ошибка конфигурации модели. Мы уже знаем об этом.",
+            error_message=(
+                f"Модель '{decision.model}' из конфига роутера не зарегистрирована в adapters."
+            ),
         )
-        latency_ms = int((time.monotonic() - started) * 1000)
-        db.add(ChatMessage(session_id=session.id, role="user", content=body.prompt))
-        db.add(
-            AIRequestLog(
-                user_id=user.user_id,
-                session_id=session.id,
-                task_type=classification.task_type,
-                confidence=classification.confidence,
-                used_fallback_confidence=decision.used_fallback_confidence,
-                model_used=decision.model,
-                tokens_in=0,
-                tokens_out=0,
-                latency_ms=latency_ms,
-                status=status,
-                error_message=error_message,
-            )
-        )
-        await db.commit()
-        raise HTTPException(
-            status_code=500, detail="Ошибка конфигурации модели. Мы уже знаем об этом."
-        )
+
+    adapter = adapters[decision.model]
+    # В model_used (лог, история, ответ) пишем РЕАЛЬНЫЙ ID модели провайдера;
+    # логическое имя остаётся ключом роутера и значением параметра запроса `model`.
+    model_id = adapter.model
 
     # 3. Выполнение задачи
     table_result: list[dict] | None = None
-    status = "success"
-    error_message = None
 
     try:
         if classification.task_type == "db_query" and not decision.used_fallback_confidence:
             text_out, table_result, tokens_in, tokens_out = await _handle_db_query(
-                contextual_prompt, user, adapters[decision.model]
+                contextual_prompt, user, adapter
             )
         else:
-            adapter = adapters[decision.model]
             result = await adapter.generate(
                 prompt=contextual_prompt,
                 system=SYSTEM_PROMPT,
@@ -130,25 +127,36 @@ async def chat(
             )
             text_out = result.text
             tokens_in, tokens_out = result.tokens_in, result.tokens_out
-    except Exception as e:  # noqa: BLE001 — намеренно широкий catch: любая ошибка
-        # должна попасть в лог, а не уронить запрос без следа
-        status = "error"
-        error_message = str(e)[:500]
-        text_out = "Не удалось обработать запрос. Попробуйте ещё раз."
-        tokens_in = tokens_out = 0
+    except Exception as e:  # noqa: BLE001 — любая ошибка провайдера/билдера -> 5xx + запись в лог
+        status_code, detail, error_message = describe_failure(e)
+        await fail_request(
+            db,
+            user_id=user.user_id,
+            session_id=session.id,
+            session_created=session_created,
+            task_type=classification.task_type,
+            confidence=classification.confidence,
+            used_fallback_confidence=decision.used_fallback_confidence,
+            model_used=model_id,
+            started=started,
+            status_code=status_code,
+            detail=detail,
+            error_message=error_message,
+        )
 
     latency_ms = int((time.monotonic() - started) * 1000)
 
     # 4. История чатов — сохраняем оба сообщения (сессия уже резолвлена в
     # шаге 0). ВАЖНО: content=body.prompt, а не contextual_prompt — в базу
-    # идёт только то, что реально написал пользователь.
+    # идёт только то, что реально написал пользователь. Сюда доходим только
+    # при успехе: сбои в историю не попадают (см. fail_request).
     db.add(ChatMessage(session_id=session.id, role="user", content=body.prompt))
     db.add(
         ChatMessage(
             session_id=session.id,
             role="ai",
             content=text_out,
-            model_used=decision.model,
+            model_used=model_id,
             task_type=classification.task_type,
             table_data=table_result,
         )
@@ -162,12 +170,12 @@ async def chat(
             task_type=classification.task_type,
             confidence=classification.confidence,
             used_fallback_confidence=decision.used_fallback_confidence,
-            model_used=decision.model,
+            model_used=model_id,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             latency_ms=latency_ms,
-            status=status,
-            error_message=error_message,
+            status="success",
+            error_message=None,
         )
     )
     await db.commit()
@@ -176,13 +184,78 @@ async def chat(
         session_id=session.id,
         text=text_out,
         task_type=classification.task_type,
-        model_used=decision.model,
+        model_used=model_id,
         confidence=classification.confidence,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         latency_ms=latency_ms,
         table=table_result,
+        needs_review=decision.require_human_review,
     )
+
+
+def describe_failure(exc: Exception) -> tuple[int, str, str]:
+    """(HTTP-статус, безопасное сообщение пользователю, текст для лога).
+    В detail никогда не попадает текст исключения — только в error_message лога."""
+    if isinstance(exc, ToolExecutionError):
+        return (
+            500,
+            "Не удалось сформировать файл. Попробуйте ещё раз.",
+            f"{type(exc.cause).__name__} в {exc.tool_name}: {exc.cause}"[:500],
+        )
+    return (
+        502,
+        "Не удалось обработать запрос: сервис модели недоступен. Попробуйте ещё раз.",
+        f"{type(exc).__name__}: {exc}"[:500],
+    )
+
+
+async def fail_request(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    session_id: int,
+    session_created: bool,
+    task_type: str,
+    confidence: float,
+    used_fallback_confidence: bool,
+    model_used: str,
+    started: float,
+    status_code: int,
+    detail: str,
+    error_message: str,
+) -> NoReturn:
+    """Фиксирует сбой запроса и отвечает 5xx.
+
+    Сбой НЕ попадает в историю чата: ни сообщение ассистента, ни сообщение
+    пользователя не сохраняются (повтор запроса не плодит дубли реплик). Если
+    сессия была создана этим же запросом — откатываем её, чтобы не оставлять в
+    списке чатов пустую сессию; тогда в логе session_id=None. Реальная причина
+    пишется только в ai_request_logs.error_message.
+    """
+    if session_created:
+        await db.rollback()
+        log_session_id = None
+    else:
+        log_session_id = session_id
+
+    db.add(
+        AIRequestLog(
+            user_id=user_id,
+            session_id=log_session_id,
+            task_type=task_type,
+            confidence=confidence,
+            used_fallback_confidence=used_fallback_confidence,
+            model_used=model_used,
+            tokens_in=0,
+            tokens_out=0,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            status="error",
+            error_message=error_message,
+        )
+    )
+    await db.commit()
+    raise HTTPException(status_code=status_code, detail=detail)
 
 
 _HISTORY_MESSAGES_LIMIT = 20  # ~10 предыдущих обменов (user+ai) для контекста
@@ -259,7 +332,9 @@ async def _handle_db_query(
         f"(или `to_char(col, 'DD.MM.YYYY')`), если пользователь не просил точное время.\n\n"
         f"Вопрос: {prompt}"
     )
-    result = await adapter.generate(prompt=sql_prompt, max_tokens=1500)
+    # tools=[] обязателен: без него adapter.generate() цепляет файловые tools,
+    # и модель могла ответить вызовом generate_spreadsheet вместо SQL.
+    result = await adapter.generate(prompt=sql_prompt, max_tokens=1500, tools=[])
     generated_sql = _extract_sql(result.text)
     generated_sql = _strip_hidden_columns(generated_sql, prompt)
 

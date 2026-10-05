@@ -26,6 +26,14 @@ class Settings(BaseSettings):
     # "https://erp.kerneu.local,https://erp.kerneu.kz"
     cors_allowed_origins: str = ""
 
+    # Cloudflare R2. Дефолтов нет намеренно: bucket/домен не должны
+    # молча подставляться из кода.
+    r2_account_id: str = ""
+    r2_access_key: str = ""
+    r2_secret_key: str = ""
+    r2_bucket_name: str = ""
+    r2_public_domain: str = ""
+
     environment: str = "development"
     log_level: str = "INFO"
 

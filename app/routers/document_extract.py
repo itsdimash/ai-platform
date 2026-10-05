@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 
 from app.auth import CurrentUser, get_current_user
 from app.utils.r2 import upload_file_to_r2
@@ -81,7 +82,9 @@ async def extract_document_text(
         )
 
     content_type = file.content_type or "application/octet-stream"
-    file_url = upload_file_to_r2(
+    # boto3 синхронный — не блокируем event loop.
+    file_url = await run_in_threadpool(
+        upload_file_to_r2,
         file_bytes=content,
         original_filename=file.filename,
         content_type=content_type,

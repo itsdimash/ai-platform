@@ -2,10 +2,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-from app.utils.docx_builder import DOCUMENT_TOOL
-from app.utils.image_builder import IMAGE_TOOL
-from app.utils.pptx_builder import PRESENTATION_TOOL
-from app.utils.xlsx_builder import SPREADSHEET_TOOL
+from app.tools import ALL_TOOLS
 
 
 @dataclass
@@ -25,15 +22,15 @@ class Attachment:
     kind: Literal["image", "pdf_document"]
 
 
-# ДОБАВЛЕНО: DOCUMENT_TOOL (.docx) и SPREADSHEET_TOOL (.xlsx) — раньше AI мог
-# создавать только презентации и картинки, хотя вся инфраструктура чтения
-# .docx/.xlsx (routers/document_extract.py) и заливки в R2 (utils/r2.py)
-# уже была на месте.
-ALL_TOOLS = [PRESENTATION_TOOL, IMAGE_TOOL, DOCUMENT_TOOL, SPREADSHEET_TOOL]
+__all__ = ["ALL_TOOLS", "Attachment", "GenerationResult", "ModelAdapter"]
 
 
 class ModelAdapter(ABC):
     name: str
+    # Реальный ID модели у провайдера (из config.yaml -> models). Именно он
+    # пишется в model_used в логах/истории; логическое имя ("claude-sonnet")
+    # остаётся только внутренним ключом роутера и API-параметра `model`.
+    model: str
 
     @abstractmethod
     async def generate(

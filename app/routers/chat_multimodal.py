@@ -47,6 +47,8 @@ from .chat import (
     _get_or_create_session,
     _get_recent_history,
     _route_engine,
+    describe_failure,
+    fail_request,
 )
 from .deps import get_adapters
 from .schemas import ChatResponse
@@ -232,6 +234,7 @@ async def chat_multimodal(
         confidence = 0.0
         used_fallback_confidence = False
         web_search = False
+        needs_review = False
         max_tokens = _route_engine.default_max_tokens
     else:
         contextual_for_classify = _build_contextual_prompt(history_messages, prompt)
@@ -247,35 +250,36 @@ async def chat_multimodal(
             rule = _route_engine.rule_for(task_type)
             model_name = body_model
             web_search = rule.get("web_search", False)
+            needs_review = rule.get("require_human_review", False)
             used_fallback_confidence = False
             max_tokens = rule.get("max_tokens", _route_engine.default_max_tokens)
         else:
             decision = _route_engine.decide(task_type, confidence)
             model_name = decision.model
             web_search = decision.web_search
+            needs_review = decision.require_human_review
             used_fallback_confidence = decision.used_fallback_confidence
             max_tokens = decision.max_tokens
 
     if model_name not in adapters:
-        _latency = int((time.monotonic() - started) * 1000)
-        db.add(ChatMessage(session_id=session.id, role="user", content=prompt))
-        db.add(
-            AIRequestLog(
-                user_id=user.user_id,
-                session_id=session.id,
-                task_type=task_type,
-                confidence=confidence,
-                used_fallback_confidence=used_fallback_confidence,
-                model_used=model_name,
-                tokens_in=0,
-                tokens_out=0,
-                latency_ms=_latency,
-                status="error",
-                error_message=f"Неизвестная модель: {model_name!r}",
-            )
+        await fail_request(
+            db,
+            user_id=user.user_id,
+            session_id=session.id,
+            session_created=sid is None,
+            task_type=task_type,
+            confidence=confidence,
+            used_fallback_confidence=used_fallback_confidence,
+            model_used=model_name,
+            started=started,
+            status_code=400,
+            detail=f"Неизвестная модель: {model_name!r}",
+            error_message=f"Неизвестная модель: {model_name!r}",
         )
-        await db.commit()
-        raise HTTPException(status_code=400, detail=f"Неизвестная модель: {model_name!r}")
+
+    adapter = adapters[model_name]
+    # В model_used пишем РЕАЛЬНЫЙ ID модели провайдера (см. routers/chat.py).
+    model_id = adapter.model
 
     # --- Сборка вложений и итогового промпта -----------------------------
     attachments: list[Attachment] = [
@@ -321,23 +325,32 @@ async def chat_multimodal(
     contextual_prompt = _build_contextual_prompt(history_messages, final_prompt)
 
     # --- Вызов модели ---------------------------------------------------
-    status_str = "success"
-    error_message = None
     try:
-        result = await adapters[model_name].generate(
+        result = await adapter.generate(
             prompt=contextual_prompt,
             system=SYSTEM_PROMPT,
             web_search=web_search,
             max_tokens=max_tokens,
             attachments=attachments or None,
         )
-        text_out = result.text
-        tokens_in, tokens_out = result.tokens_in, result.tokens_out
-    except Exception as exc:  # noqa: BLE001 — любая ошибка идёт в лог, а не 500 без следа
-        status_str = "error"
-        error_message = str(exc)[:500]
-        text_out = "Не удалось обработать запрос. Попробуйте ещё раз."
-        tokens_in = tokens_out = 0
+    except Exception as exc:  # noqa: BLE001 — любая ошибка провайдера/билдера -> 5xx + запись в лог
+        status_code, detail, error_message = describe_failure(exc)
+        await fail_request(
+            db,
+            user_id=user.user_id,
+            session_id=session.id,
+            session_created=sid is None,
+            task_type=task_type,
+            confidence=confidence,
+            used_fallback_confidence=used_fallback_confidence,
+            model_used=model_id,
+            started=started,
+            status_code=status_code,
+            detail=detail,
+            error_message=error_message,
+        )
+    text_out = result.text
+    tokens_in, tokens_out = result.tokens_in, result.tokens_out
 
     latency_ms = int((time.monotonic() - started) * 1000)
 
@@ -364,7 +377,7 @@ async def chat_multimodal(
             session_id=session.id,
             role="ai",
             content=text_out,
-            model_used=model_name,
+            model_used=model_id,
             task_type=task_type,
         )
     )
@@ -375,12 +388,12 @@ async def chat_multimodal(
             task_type=task_type,
             confidence=confidence,
             used_fallback_confidence=used_fallback_confidence,
-            model_used=model_name,
+            model_used=model_id,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             latency_ms=latency_ms,
-            status=status_str,
-            error_message=error_message,
+            status="success",
+            error_message=None,
         )
     )
     await db.commit()
@@ -389,10 +402,11 @@ async def chat_multimodal(
         session_id=session.id,
         text=text_out,
         task_type=task_type,
-        model_used=model_name,
+        model_used=model_id,
         confidence=confidence,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         latency_ms=latency_ms,
         table=None,
+        needs_review=needs_review,
     )
