@@ -15,10 +15,11 @@ import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from app.utils.deck.images import generate_deck_images
 from app.utils.docx_builder import DOCUMENT_TOOL, build_document
 from app.utils.image_builder import IMAGE_TOOL, generate_image_bytes
 from app.utils.pdf_builder import PDF_TOOL, build_pdf
-from app.utils.pptx_builder import PRESENTATION_TOOL, build_presentation
+from app.utils.pptx_builder import PRESENTATION_TOOL, prepare_deck, render
 from app.utils.r2 import put_bytes_async
 from app.utils.storage import build_key, display_name, make_record
 from app.utils.xlsx_builder import SPREADSHEET_TOOL, build_spreadsheet
@@ -101,25 +102,29 @@ async def _run_one(
     """Выполняет один tool-вызов; None, если имя инструмента не наше
     (например, серверные tools провайдера)."""
     if name == "generate_presentation":
-        title = clean_line(args.get("title")) or "Презентация"
-        slides = args.get("slides") or []
-        data = await asyncio.to_thread(build_presentation, title, args.get("subtitle", ""), slides)
-        record = await _store(ctx, f"{title}.pptx", data, MIME_PPTX)
-        count = _plural(len(slides) + 1, "слайд", "слайда", "слайдов")
-        return ToolResult(
-            record, file_reply("📊", "Презентация", title, count, args.get("summary"))
-        )
+        # Нормализация и раскладка слайдов -> картинки (параллельно, с общим таймаутом) ->
+        # сборка файла в потоке. Сбой картинки не ломает колоду.
+        deck, slides = prepare_deck(args)
+        images, image_model = await generate_deck_images(deck, slides)
+        rendered = await asyncio.to_thread(render, deck, slides, images)
+        title = clean_line(deck.title) or "Презентация"
+        record = await _store(ctx, f"{title}.pptx", rendered.data, MIME_PPTX)
+        count = _plural(rendered.slide_count, "слайд", "слайда", "слайдов")
+        reply = file_reply("📊", "Презентация", title, count, deck.summary)
+        return ToolResult(record, reply, image_model=image_model)
 
     if name == "generate_document":
         title = clean_line(args.get("title")) or "Документ"
         sections = args.get("sections") or []
-        data = await asyncio.to_thread(build_document, title, sections)
+        data = await asyncio.to_thread(
+            build_document, title, sections, clean_line(args.get("subtitle"))
+        )
         record = await _store(ctx, f"{title}.docx", data, MIME_DOCX)
         count = _plural(len(sections), "раздел", "раздела", "разделов")
         return ToolResult(record, file_reply("📄", "Документ", title, count, args.get("summary")))
 
     if name == "generate_spreadsheet":
-        filename = clean_line(args.get("filename")) or "Таблица"
+        filename = clean_line(args.get("filename")).replace("_", " ").strip() or "Таблица"
         sheets = args.get("sheets") or []
         data = await asyncio.to_thread(build_spreadsheet, sheets)
         record = await _store(ctx, f"{filename}.xlsx", data, MIME_XLSX)
@@ -130,7 +135,7 @@ async def _run_one(
     if name == "generate_pdf":
         title = clean_line(args.get("title")) or "Документ"
         sections = args.get("sections") or []
-        data = await asyncio.to_thread(build_pdf, title, sections)
+        data = await asyncio.to_thread(build_pdf, title, sections, clean_line(args.get("subtitle")))
         record = await _store(ctx, f"{title}.pdf", data, MIME_PDF)
         count = _plural(len(sections), "раздел", "раздела", "разделов")
         return ToolResult(record, file_reply("📕", "PDF", title, count, args.get("summary")))

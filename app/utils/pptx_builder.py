@@ -1,71 +1,42 @@
-import io
+"""Фасад генерации презентаций. Реализация — пакет app/utils/deck:
+schema (tool + нормализация) -> layout (разбиение/подбор кегля) -> images -> render."""
 
-from pptx import Presentation
+from collections import Counter
 
-from app.utils.tool_schema import SUMMARY_PROP
+from app.utils.deck.layout import plan_slides
+from app.utils.deck.render import RenderResult, render_deck
+from app.utils.deck.schema import PRESENTATION_TOOL, Deck, Slide, normalize
 
-PRESENTATION_TOOL = {
-    "name": "generate_presentation",
-    "description": "Generates a PowerPoint presentation (.pptx) file and delivers it to the user as a downloadable attachment when requested.",
-    "parameters": {
-        "type": "object",
-        "properties": {
-            "summary": SUMMARY_PROP,
-            "title": {"type": "string", "description": "The presentation main title"},
-            "subtitle": {
-                "type": "string",
-                "description": "Presentation subtitle or author context",
-            },
-            "slides": {
-                "type": "array",
-                "description": "List of slide topics and content",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "title": {"type": "string", "description": "Slide heading"},
-                        "content": {
-                            "type": "array",
-                            "items": {"type": "string"},
-                            "description": "Bullet points for the slide",
-                        },
-                    },
-                    "required": ["title", "content"],
-                },
-            },
-        },
-        "required": ["title", "slides", "summary"],
-    },
-}
+# Накопительные счётчики нормализации/разбиений за жизнь процесса (для отчётов и диагностики).
+STATS_TOTAL: Counter = Counter()
+
+
+def prepare_deck(args: dict) -> tuple[Deck, list[Slide]]:
+    """Ответ модели -> нормализованная колода + раскладка слайдов (разбиения, лимиты)."""
+    deck = normalize(args)
+    slides = plan_slides(deck)
+    return deck, slides
+
+
+def render(deck: Deck, slides: list[Slide], images: dict) -> RenderResult:
+    result = render_deck(deck, slides, images)
+    STATS_TOTAL.update(deck.stats)
+    return result
 
 
 def build_presentation(title: str, subtitle: str, slides_data: list) -> bytes:
-    """Собирает .pptx и возвращает байты (загрузка в R2 — в app/tools)."""
-    prs = Presentation()
+    """Совместимый вызов (title, subtitle, [{title, content}]) -> .pptx без картинок."""
+    args = {
+        "title": title,
+        "subtitle": subtitle,
+        "theme": "graphite",
+        "slides": [
+            {"layout": "bullets", "title": s.get("title", ""), "bullets": s.get("content", [])}
+            for s in slides_data
+        ],
+    }
+    deck, slides = prepare_deck(args)
+    return render(deck, slides, {}).data
 
-    title_slide_layout = prs.slide_layouts[0]
-    slide = prs.slides.add_slide(title_slide_layout)
-    title_shape = slide.shapes.title
-    subtitle_shape = slide.placeholders[1]
-    title_shape.text = title
-    subtitle_shape.text = subtitle or "Kerneu Group"
 
-    bullet_slide_layout = prs.slide_layouts[1]
-    for s_data in slides_data:
-        slide = prs.slides.add_slide(bullet_slide_layout)
-        shapes = slide.shapes
-        title_shape = shapes.title
-        body_shape = shapes.placeholders[1]
-
-        title_shape.text = s_data.get("title", "")
-        tf = body_shape.text_frame
-
-        content_items = s_data.get("content", [])
-        if content_items:
-            tf.text = content_items[0]
-            for item in content_items[1:]:
-                p = tf.add_paragraph()
-                p.text = item
-
-    stream = io.BytesIO()
-    prs.save(stream)
-    return stream.getvalue()
+__all__ = ["PRESENTATION_TOOL", "STATS_TOTAL", "build_presentation", "prepare_deck", "render"]

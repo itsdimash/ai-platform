@@ -84,6 +84,19 @@ def validate_config(config: dict, known_tools: Iterable[str]) -> None:
         if name not in models:
             errors.append(f"prices.{name}: нет такой модели в models")
 
+    deck = config.get("deck") or {}
+    hard_cap = 8  # app.limits.DECK_MAX_IMAGES_HARD (route.py — листовой модуль, без импорта limits)
+    if not isinstance(deck.get("max_images"), int) or not 0 <= deck["max_images"] <= hard_cap:
+        errors.append(f"deck.max_images: целое от 0 до {hard_cap}")
+    for key in ("hero_quality", "content_quality"):
+        if deck.get(key) not in ("low", "medium", "high", "auto"):
+            errors.append(f"deck.{key}: low | medium | high | auto")
+    for key in ("hero_size", "content_size", "wide_size"):
+        if not deck.get(key):
+            errors.append(f"deck.{key}: не задано")
+    if not isinstance(deck.get("images_timeout_s"), (int, float)) or deck["images_timeout_s"] <= 0:
+        errors.append("deck.images_timeout_s: положительное число")
+
     image = config.get("image") or {}
     for key in ("model", "fallback_model", "quality"):
         if not image.get(key):
