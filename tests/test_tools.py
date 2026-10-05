@@ -109,7 +109,7 @@ async def test_builder_failure_raises_tool_execution_error(stored, monkeypatch):
     def boom(*a, **k):
         raise RuntimeError("builder exploded")
 
-    monkeypatch.setattr(tools, "build_presentation", boom)
+    monkeypatch.setattr(tools, "render", boom)
     with pytest.raises(ToolExecutionError) as exc_info:
         await apply_tool_calls(
             _result([{"name": "generate_presentation", "args": {"title": "x", "slides": []}}]),

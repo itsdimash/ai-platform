@@ -24,6 +24,18 @@ UPLOAD_ENVELOPE_OVERHEAD = 2 * MB
 MAX_EXTRACTED_CHARS_PER_FILE = 60_000
 MAX_EXTRACTED_CHARS_TOTAL = 200_000
 
+# --- Генерация файлов ---------------------------------------------------------
+MAX_SLIDES = 100  # потолок слайдов в колоде (после разбиений)
+MAX_XLSX_ROWS = 50_000  # потолок строк на лист xlsx
+DECK_MAX_IMAGES_HARD = (
+    8  # жёсткий потолок картинок в колоде (config.yaml -> deck.max_images не выше)
+)
+DECK_TABLE_ROWS_PER_SLIDE = 8  # строк данных в таблице слайда (остальное — на следующий слайд)
+DECK_TABLE_MAX_COLS = 6
+DECK_CHART_MAX_CATEGORIES = 12
+DECK_CHART_MAX_SERIES = 4
+DECK_MAX_BULLETS = 5  # рекомендуемый максимум пунктов на слайде (больше — делим слайд)
+
 # --- Anthropic ----------------------------------------------------------------
 ANTHROPIC_IMAGE_MAX_RAW_BYTES = 7_500_000  # 10 МБ base64
 ANTHROPIC_IMAGE_MAX_EDGE = 8000
