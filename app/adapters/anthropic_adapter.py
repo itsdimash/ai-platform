@@ -4,8 +4,6 @@ from typing import Any
 
 from anthropic import AsyncAnthropic
 
-from app.tools import run_tool_calls
-
 from .base import ALL_TOOLS, Attachment, GenerationResult, ModelAdapter
 
 
@@ -66,11 +64,12 @@ class AnthropicAdapter(ModelAdapter):
         output_text = "\n".join(text_blocks)
 
         # Клиентские tool_use (серверный web_search приходит как server_tool_use
-        # и сюда не попадает). Любой сбой инструмента -> ToolExecutionError.
-        tool_calls = [(b.name, b.input or {}) for b in response.content if b.type == "tool_use"]
-        tool_text = await run_tool_calls(tool_calls, prompt=prompt)
-        if tool_text is not None:
-            output_text = tool_text
+        # и сюда не попадает). Исполняет их app.tools.apply_tool_calls.
+        tool_calls = [
+            {"name": b.name, "args": b.input or {}}
+            for b in response.content
+            if b.type == "tool_use"
+        ]
 
         return GenerationResult(
             text=output_text,
@@ -78,6 +77,7 @@ class AnthropicAdapter(ModelAdapter):
             tokens_out=response.usage.output_tokens,
             latency_ms=latency_ms,
             raw={"id": response.id, "model": response.model, "stop_reason": response.stop_reason},
+            tool_calls=tool_calls,
         )
 
     @staticmethod

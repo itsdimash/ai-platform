@@ -5,8 +5,6 @@ from typing import Any, cast
 
 from openai import AsyncOpenAI
 
-from app.tools import run_tool_calls
-
 from .base import ALL_TOOLS, Attachment, GenerationResult, ModelAdapter
 
 
@@ -96,13 +94,10 @@ class OpenAIAdapter(ModelAdapter):
         output_text = choice.content or ""
 
         tool_calls = [
-            (tc.function.name, json.loads(tc.function.arguments or "{}"))
+            {"name": tc.function.name, "args": json.loads(tc.function.arguments or "{}")}
             for tc in (choice.tool_calls or [])
             if tc.type == "function"
         ]
-        tool_text = await run_tool_calls(tool_calls, prompt=prompt)
-        if tool_text is not None:
-            output_text = tool_text
 
         return GenerationResult(
             text=output_text,
@@ -110,6 +105,7 @@ class OpenAIAdapter(ModelAdapter):
             tokens_out=response.usage.completion_tokens if response.usage else 0,
             latency_ms=latency_ms,
             raw={"id": response.id, "model": response.model},
+            tool_calls=tool_calls,
         )
 
     async def _generate_with_web_search(
@@ -166,13 +162,10 @@ class OpenAIAdapter(ModelAdapter):
         output_text = response.output_text or ""
 
         tool_calls = [
-            (item.name, json.loads(item.arguments or "{}"))
+            {"name": item.name, "args": json.loads(item.arguments or "{}")}
             for item in response.output
             if item.type == "function_call"
         ]
-        tool_text = await run_tool_calls(tool_calls, prompt=prompt)
-        if tool_text is not None:
-            output_text = tool_text
 
         usage = response.usage
         return GenerationResult(
@@ -181,4 +174,5 @@ class OpenAIAdapter(ModelAdapter):
             tokens_out=usage.output_tokens if usage else 0,
             latency_ms=latency_ms,
             raw={"id": response.id, "model": response.model},
+            tool_calls=tool_calls,
         )

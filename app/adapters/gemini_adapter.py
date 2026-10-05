@@ -4,8 +4,6 @@ from typing import Any
 from google import genai
 from google.genai import types
 
-from app.tools import run_tool_calls
-
 from .base import ALL_TOOLS, Attachment, GenerationResult, ModelAdapter
 
 _PRO_VALID_LEVELS = {"low", "high"}
@@ -89,13 +87,10 @@ class GeminiAdapter(ModelAdapter):
         latency_ms = int((time.monotonic() - started) * 1000)
         output_text = response.text or ""
 
-        # Любой сбой инструмента -> ToolExecutionError (единый обработчик в app/tools).
         tool_calls = [
-            (call.name or "", call.args or {}) for call in (response.function_calls or [])
+            {"name": call.name or "", "args": dict(call.args or {})}
+            for call in (response.function_calls or [])
         ]
-        tool_text = await run_tool_calls(tool_calls, prompt=prompt)
-        if tool_text is not None:
-            output_text = tool_text
 
         usage = response.usage_metadata
         tokens_in = usage.prompt_token_count or 0 if usage else 0
@@ -107,6 +102,7 @@ class GeminiAdapter(ModelAdapter):
             tokens_out=tokens_out,
             latency_ms=latency_ms,
             raw={"model": self.model},
+            tool_calls=tool_calls,
         )
 
     @staticmethod

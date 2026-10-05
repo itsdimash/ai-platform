@@ -12,7 +12,11 @@ class GenerationResult:
     tokens_out: int
     latency_ms: int
     raw: dict = field(default_factory=dict)
+    # Вызовы наших инструментов из ответа модели: [{"name": str, "args": dict}].
+    # Адаптеры их только достают; исполняет app.tools.apply_tool_calls.
     tool_calls: list[dict] = field(default_factory=list)
+    # Записи вложений (формат БД, без url), заполняются после исполнения tools.
+    attachments: list[dict] = field(default_factory=list)
 
 
 @dataclass

@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..adapters.base import ModelAdapter
@@ -18,7 +18,8 @@ from ..models.chat import ChatMessage, ChatSession
 from ..models.logs import AIRequestLog
 from ..router.route import RouteDecision, Router
 from ..system_prompt import SYSTEM_PROMPT
-from ..tools import ToolExecutionError
+from ..tools import ToolContext, ToolExecutionError, apply_tool_calls
+from ..utils.attachments import resolve_attachment_keys, with_urls
 from .deps import get_adapters
 from .schemas import ChatRequest, ChatResponse
 
@@ -47,6 +48,9 @@ async def chat(
     # а не отдельными "турнами" в API провайдера. В историю сохраняется
     # ОРИГИНАЛЬНЫЙ body.prompt (не contextual_prompt) — иначе контекст
     # задваивался бы на каждом следующем сообщении.
+    # Ключи ранее загруженных файлов проверяем ДО создания сессии и до трат на модель.
+    user_attachments = await resolve_attachment_keys(body.attachment_keys, user.user_id)
+
     session = await _get_or_create_session(db, body.session_id, user.user_id, body.prompt)
     history_messages = await _get_recent_history(db, session.id)
     contextual_prompt = _build_contextual_prompt(history_messages, body.prompt)
@@ -112,6 +116,7 @@ async def chat(
 
     # 3. Выполнение задачи
     table_result: list[dict] | None = None
+    ai_attachments: list[dict] = []
 
     try:
         if classification.task_type == "db_query" and not decision.used_fallback_confidence:
@@ -125,7 +130,14 @@ async def chat(
                 web_search=decision.web_search,
                 max_tokens=decision.max_tokens,
             )
+            # Файловые tools исполняются здесь (сбой -> ToolExecutionError -> 5xx).
+            result = await apply_tool_calls(
+                result,
+                ctx=ToolContext(user_id=user.user_id, session_id=session.id),
+                prompt=contextual_prompt,
+            )
             text_out = result.text
+            ai_attachments = result.attachments
             tokens_in, tokens_out = result.tokens_in, result.tokens_out
     except Exception as e:  # noqa: BLE001 — любая ошибка провайдера/билдера -> 5xx + запись в лог
         status_code, detail, error_message = describe_failure(e)
@@ -150,7 +162,14 @@ async def chat(
     # шаге 0). ВАЖНО: content=body.prompt, а не contextual_prompt — в базу
     # идёт только то, что реально написал пользователь. Сюда доходим только
     # при успехе: сбои в историю не попадают (см. fail_request).
-    db.add(ChatMessage(session_id=session.id, role="user", content=body.prompt))
+    db.add(
+        ChatMessage(
+            session_id=session.id,
+            role="user",
+            content=body.prompt,
+            attachments=user_attachments,
+        )
+    )
     db.add(
         ChatMessage(
             session_id=session.id,
@@ -159,8 +178,10 @@ async def chat(
             model_used=model_id,
             task_type=classification.task_type,
             table_data=table_result,
+            attachments=ai_attachments,
         )
     )
+    await touch_session(db, session.id)
 
     # 5. Логирование — с первого дня, не после
     db.add(
@@ -191,6 +212,16 @@ async def chat(
         latency_ms=latency_ms,
         table=table_result,
         needs_review=decision.require_human_review,
+        attachments=with_urls(ai_attachments),
+    )
+
+
+async def touch_session(db: AsyncSession, session_id: int) -> None:
+    """Обновляет ChatSession.updated_at при добавлении сообщений (ORM onupdate
+    срабатывает только при изменении самой строки сессии, поэтому раньше список
+    чатов не сортировался по последней активности)."""
+    await db.execute(
+        update(ChatSession).where(ChatSession.id == session_id).values(updated_at=func.now())
     )
 
 
@@ -274,7 +305,7 @@ async def _get_recent_history(db: AsyncSession, session_id: int) -> list[ChatMes
     result = await db.execute(
         select(ChatMessage)
         .where(ChatMessage.session_id == session_id)
-        .order_by(ChatMessage.created_at.desc())
+        .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
         .limit(_HISTORY_MESSAGES_LIMIT)
     )
     return list(reversed(result.scalars().all()))

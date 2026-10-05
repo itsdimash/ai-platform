@@ -6,11 +6,10 @@ from openai import AsyncOpenAI
 
 from app.config import get_settings
 from app.router.route import load_config
-from app.utils.r2 import upload_file_to_r2
 
 IMAGE_TOOL = {
     "name": "generate_image",
-    "description": "Generates a photo, illustration, or image using OpenAI Image API and returns a permanent URL when requested by the user.",
+    "description": "Generates a photo, illustration, or image using OpenAI Image API and delivers it to the user as an attached image file.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -32,10 +31,10 @@ IMAGE_TOOL = {
 }
 
 
-async def generate_and_save_image(prompt: str, size: str = "1024x1024") -> str:
-    """Генерирует изображение и кладёт его в R2. Любая ошибка (ключ, модель,
-    таймаут, R2) пробрасывается наверх — её превращает в ToolExecutionError
-    общий исполнитель инструментов (app/tools)."""
+async def generate_image_bytes(prompt: str, size: str = "1024x1024") -> bytes:
+    """Генерирует изображение и возвращает PNG-байты (загрузка в R2 — в app/tools).
+    Любая ошибка (ключ, модель, таймаут) пробрасывается наверх — её превращает
+    в ToolExecutionError общий исполнитель инструментов."""
     api_key = get_settings().openai_api_key
     if not api_key:
         raise ValueError("OPENAI_API_KEY не задан")
@@ -72,10 +71,4 @@ async def generate_and_save_image(prompt: str, size: str = "1024x1024") -> str:
     else:
         raise ValueError("API не вернул ни url, ни b64_json изображения.")
 
-    return await asyncio.to_thread(
-        upload_file_to_r2,
-        file_bytes=image_bytes,
-        original_filename="generated_image.png",
-        content_type="image/png",
-        folder="images",
-    )
+    return image_bytes

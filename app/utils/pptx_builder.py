@@ -2,11 +2,9 @@ import io
 
 from pptx import Presentation
 
-from app.utils.r2 import upload_file_to_r2
-
 PRESENTATION_TOOL = {
     "name": "generate_presentation",
-    "description": "Generates a PowerPoint presentation (.pptx) file and returns a download link when requested by the user.",
+    "description": "Generates a PowerPoint presentation (.pptx) file and delivers it to the user as a downloadable attachment when requested.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -37,7 +35,8 @@ PRESENTATION_TOOL = {
 }
 
 
-def create_presentation_file(title: str, subtitle: str, slides_data: list) -> str:
+def build_presentation(title: str, subtitle: str, slides_data: list) -> bytes:
+    """Собирает .pptx и возвращает байты (загрузка в R2 — в app/tools)."""
     prs = Presentation()
 
     title_slide_layout = prs.slide_layouts[0]
@@ -66,14 +65,4 @@ def create_presentation_file(title: str, subtitle: str, slides_data: list) -> st
 
     stream = io.BytesIO()
     prs.save(stream)
-    file_bytes = stream.getvalue()
-
-    safe_title = "".join(c if c.isalnum() else "_" for c in title)[:20]
-    filename = f"{safe_title}.pptx"
-
-    return upload_file_to_r2(
-        file_bytes=file_bytes,
-        original_filename=filename,
-        content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-        folder="presentations",
-    )
+    return stream.getvalue()

@@ -2,21 +2,19 @@
 
 Зеркалит app/utils/pptx_builder.py: модель отдаёт структурированные данные
 (заголовок + секции), мы собираем реальный .docx через python-docx и
-заливаем в R2, возвращая публичную ссылку.
+возвращаем байты (загрузка в R2 — в app/tools).
 """
 
 import io
 
 from docx import Document
 
-from app.utils.r2 import upload_file_to_r2
-
 DOCUMENT_TOOL = {
     "name": "generate_document",
     "description": (
         "Generates a Word document (.docx) with a title and one or more "
         "sections (each with an optional heading and body paragraphs), and "
-        "returns a download link. Use this when the user asks for a "
+        "delivers it as a downloadable attachment. Use this when the user asks for a "
         "document, report, memo, letter, contract draft, or any text-heavy "
         "deliverable they want to download or send elsewhere — NOT for "
         "short answers that fit fine as a normal chat reply."
@@ -53,7 +51,8 @@ DOCUMENT_TOOL = {
 }
 
 
-def create_document_file(title: str, sections: list) -> str:
+def build_document(title: str, sections: list) -> bytes:
+    """Собирает .docx и возвращает байты (загрузка в R2 — в app/tools)."""
     doc = Document()
     doc.add_heading(title, level=0)
 
@@ -66,14 +65,4 @@ def create_document_file(title: str, sections: list) -> str:
 
     stream = io.BytesIO()
     doc.save(stream)
-    file_bytes = stream.getvalue()
-
-    safe_title = "".join(c if c.isalnum() else "_" for c in title)[:20]
-    filename = f"{safe_title}.docx"
-
-    return upload_file_to_r2(
-        file_bytes=file_bytes,
-        original_filename=filename,
-        content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        folder="documents",
-    )
+    return stream.getvalue()

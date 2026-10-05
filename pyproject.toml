@@ -24,6 +24,7 @@ dependencies = [
     "openpyxl>=3.1.5",
     "boto3>=1.43.98",
     "python-pptx>=1.0.2",
+    "reportlab>=5.0.1",
 ]
 
 [dependency-groups]
@@ -41,6 +42,10 @@ ignore = [
     "B008",  # Depends()/File()/Query() в дефолтах аргументов — штатный
              # идиом FastAPI для dependency injection, не баг.
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
 
 [tool.uv]
 package = false
