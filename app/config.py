@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -32,7 +32,11 @@ class Settings(BaseSettings):
     r2_access_key: str = ""
     r2_secret_key: str = ""
     r2_bucket_name: str = ""
+    # Публичный домен bucket. НЕОБЯЗАТЕЛЕН и для файлов ai-platform (префикс ai/)
+    # не используется: они отдаются только presigned-ссылками.
     r2_public_domain: str = ""
+    # Срок жизни presigned-ссылки, секунды (R2 максимум — 7 суток).
+    r2_presign_expires: int = Field(default=3600, ge=60, le=604800)
 
     environment: str = "development"
     log_level: str = "INFO"

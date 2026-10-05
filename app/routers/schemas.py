@@ -1,4 +1,19 @@
-from pydantic import BaseModel
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, Field, StringConstraints
+
+
+class AttachmentOut(BaseModel):
+    """Вложение сообщения. В БД хранится всё, кроме url: presigned-ссылка
+    вычисляется при каждом ответе и живёт R2_PRESIGN_EXPIRES секунд — для
+    свежей ссылки используйте GET /v1/files/{key}/url."""
+
+    type: Literal["file", "image"]
+    name: str
+    key: str
+    mime: str
+    size: int
+    url: str | None = None
 
 
 class ChatRequest(BaseModel):
@@ -10,6 +25,10 @@ class ChatRequest(BaseModel):
     # всё равно применяются — см. Router.rule_for() в app/router/route.py.
     # Допустимые значения — ключи секции `models` в app/router/config.yaml.
     model: str | None = None
+    # Ключи файлов, ранее загруженных через POST /v1/documents/extract (поле
+    # file_key). Привязываются к сообщению пользователя в истории. Только
+    # собственные ключи (ai/{user_id}/...), до 10 штук.
+    attachment_keys: list[str] = Field(default_factory=list, max_length=10)
 
 
 class ChatResponse(BaseModel):
@@ -25,3 +44,9 @@ class ChatResponse(BaseModel):
     # True, если по правилам роутинга ответ требует проверки человеком
     # (например, сгенерированный договор). Раньше флаг вычислялся и терялся.
     needs_review: bool = False
+    # Файлы/изображения, созданные ассистентом в этом ответе.
+    attachments: list[AttachmentOut] = Field(default_factory=list)
+
+
+class SessionRename(BaseModel):
+    title: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]

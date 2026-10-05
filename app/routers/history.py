@@ -1,10 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..auth import CurrentUser, get_current_user
 from ..db.session import get_db
 from ..models.chat import ChatMessage, ChatSession
+from ..utils.attachments import with_urls
+from .schemas import SessionRename
 
 router = APIRouter()
 
@@ -36,10 +38,12 @@ async def get_session_messages(
     if session is None or session.user_id != user.user_id:
         raise HTTPException(status_code=404, detail="Сессия не найдена")
 
+    # created_at у пары user/ai одинаков (одна транзакция, now() = начало
+    # транзакции), поэтому порядок добиваем по id.
     result = await db.execute(
         select(ChatMessage)
         .where(ChatMessage.session_id == session_id)
-        .order_by(ChatMessage.created_at)
+        .order_by(ChatMessage.created_at, ChatMessage.id)
     )
     messages = result.scalars().all()
     return [
@@ -50,9 +54,33 @@ async def get_session_messages(
             "task_type": m.task_type,
             "created_at": m.created_at.isoformat(),
             "table": m.table_data,
+            "attachments": with_urls(m.attachments),
         }
         for m in messages
     ]
+
+
+@router.patch("/v1/sessions/{session_id}")
+async def rename_session(
+    session_id: int,
+    body: SessionRename,
+    user: CurrentUser = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Переименовать свою сессию. updated_at не меняется — чат не должен
+    подниматься в списке из-за смены названия."""
+    session = await db.get(ChatSession, session_id)
+    if session is None or session.user_id != user.user_id:
+        raise HTTPException(status_code=404, detail="Сессия не найдена")
+
+    await db.execute(
+        update(ChatSession)
+        .where(ChatSession.id == session_id)
+        .values(title=body.title, updated_at=ChatSession.updated_at)
+    )
+    await db.commit()
+    await db.refresh(session)
+    return {"id": session.id, "title": session.title, "updated_at": session.updated_at.isoformat()}
 
 
 @router.delete("/v1/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -69,6 +97,8 @@ async def delete_session(
     удалять нужно строго через db.delete(session) (ORM), а не через
     bulk delete()-запрос — иначе сообщения осиротеют и останутся в
     таблице chat_messages без родительской сессии.
+
+    Файлы в R2 (префикс ai/) при этом НЕ удаляются.
     """
     session = await db.get(ChatSession, session_id)
     if session is None or session.user_id != user.user_id:

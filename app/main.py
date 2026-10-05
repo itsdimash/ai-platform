@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .routers import chat, chat_multimodal, document_extract, history
+from .routers import chat, chat_multimodal, document_extract, files, history
 
 settings = get_settings()
 
@@ -24,6 +24,7 @@ app.include_router(chat.router, tags=["chat"])
 app.include_router(chat_multimodal.router, tags=["chat"])
 app.include_router(history.router, tags=["history"])
 app.include_router(document_extract.router, tags=["documents"])
+app.include_router(files.router, tags=["files"])
 
 
 @app.get("/health")
