@@ -31,11 +31,7 @@ CONFIG_PATH = Path(__file__).resolve().parent.parent / "app" / "router" / "confi
 
 # ID/подстроки, которые аудит счёл потенциально устаревшими или непроверенными.
 SUSPECT_PATTERNS = {
-    "gpt-4o": "модель прошлого поколения (2024) — проверьте, нет ли более новой",
-    "claude-sonnet-5": "проверьте точный ID: актуальный может быть claude-sonnet-5-5",
-    "claude-opus-5": "проверьте точный ID: актуальный может быть claude-opus-5-5",
-    "gemini-3.6-flash": "не проверено — сверьте со списком Gemini ниже",
-    "gpt-image-2": "не проверено — сверьте со списком OpenAI ниже",
+    "gpt-4o": "модель прошлого поколения (2024) — есть gpt-5.x; оставлена как есть по решению владельца",
 }
 
 
@@ -98,6 +94,10 @@ def check_config(listed: dict[str, set[str]]) -> None:
     image = config.get("image") or {}
     if image.get("model"):
         entries.append(("image", image.get("provider", "openai"), image["model"]))
+    if image.get("fallback_model"):
+        entries.append(
+            ("image (fallback)", image.get("provider", "openai"), image["fallback_model"])
+        )
 
     if not entries:
         print("  В config.yaml нет секции `models` — сверять нечего.")
@@ -121,7 +121,9 @@ def check_config(listed: dict[str, set[str]]) -> None:
 
     tool = config.get("anthropic_web_search_tool")
     if tool:
-        print(f"\n  anthropic_web_search_tool = {tool}  (проверьте по документации Anthropic)")
+        print(
+            f"\n  anthropic_web_search_tool = {tool}  (версии 20260209/20260318 включают динамическую фильтрацию, но дороже и медленнее)"
+        )
 
 
 def main() -> None:

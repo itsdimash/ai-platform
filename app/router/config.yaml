@@ -1,79 +1,183 @@
-# Роутинг: task_type -> модель. Простой конфиг, без ML — легко менять
-# без деплоя нового кода (можно вынести в БД позже, если понадобится
-# правка без релиза вообще).
+# Роутинг и модели платформы. Единственное место, где живут ID моделей.
+# Логические имена (ключи ниже) — контракт API: их принимает параметр `model`,
+# на них ссылаются routing_rules. Реальные ID можно менять, не трогая код.
+# Проверка, что ID доступны вашим ключам: `uv run python scripts/list_models.py`.
+# Валидация этого файла выполняется при старте (app/router/route.py: validate_config).
 
+# Уверенность классификатора ниже порога -> СИЛЬНАЯ модель по умолчанию
+# (раньше был flash). Файловые категории при этом не принуждаются.
 confidence_threshold: 0.7
-fallback_model: gemini-flash  # безопасный дефолт при низкой уверенности
+low_confidence:
+  model: claude-sonnet
+  max_tokens: 8192
+  thinking: low
+  timeout_s: 600
 
-# ДОБАВЛЕНО: раньше max_tokens=2048 был жёстко зашит в коде (routers/chat.py
-# и routers/chat_multimodal.py) и применялся ОДИНАКОВО ко всем задачам —
-# и к короткому general_qa, и к генерации договора или презентации, которым
-# 2048 токенов (~1500 слов) может не хватить и результат обрежется
-# на середине. Теперь лимит настраивается здесь, по типу задачи.
-default_max_tokens: 2048
+default_max_tokens: 8192
 
-# Логическое имя (то, что видно в API: ChatRequest.model, routing_rules ниже) ->
-# провайдер и РЕАЛЬНЫЙ ID модели. Это единственное место, где живут ID моделей.
-# Проверить, что ID доступны вашим ключам: `uv run python scripts/list_models.py`
-# (скрипт сверяет этот блок со списком моделей провайдеров).
+# Часовой пояс для даты в системном промпте (например Asia/Almaty). Если tzdata в образе
+# нет, используется UTC.
+timezone: UTC
+
+limits:
+  provider_timeout_s: 600   # таймаут вызова провайдера
+  retries: 2                # ретраи SDK на 429/5xx/таймауты (с backoff)
+
+classifier:
+  model: gemini-flash-lite
+  max_tokens: 300
+  timeout_s: 60
+  max_exchanges: 2          # последнее сообщение + не более 2 предыдущих обменов
+  assistant_chars: 300      # ответы ассистента в контексте классификатора обрезаются
+
+history:
+  max_messages: 40
+  max_tokens_estimate: 120000   # страховочная обрезка по ОЦЕНКЕ токенов
+  chars_per_token: 2.5          # оценка для русского текста (консервативно)
+
+# --- Модели --------------------------------------------------------------------
+# caps — проверенные вызовами возможности (2026-10-05):
+#   thinking_mode: adaptive (Claude 5.x: thinking={"type":"adaptive"} + output_config.effort)
+#                  budget   (Claude Haiku 4.5: budget_tokens)
+#                  level    (Gemini: thinking_level из thinking_levels)
+#                  effort   (OpenAI gpt-5.x: reasoning.effort из efforts)
+#                  none     (без управляемого thinking)
+#   thinking_off:  как выключить thinking у adaptive-моделей: disabled | between_tools | unsupported
+#   forced_tool:   with_thinking — принудительный tool работает вместе с thinking
+#                  no_thinking   — только при выключенном thinking (Haiku)
+#                  unsupported   — принудительный tool_choice даёт 400 (Claude 5.5, Fable)
+#   max_output_tokens: потолок, до которого роутер ограничивает max_tokens правил
+#   refusal_fallbacks: серверные fallbacks Anthropic на отказы безопасности
 models:
-  gpt-4o-mini: {provider: openai, id: gpt-4o-mini}
-  gpt-4o: {provider: openai, id: gpt-4o}
-  claude-haiku: {provider: anthropic, id: claude-haiku-4-5-20251001}
-  claude-sonnet: {provider: anthropic, id: claude-sonnet-5}
-  claude-opus: {provider: anthropic, id: claude-opus-5}
-  gemini-flash: {provider: gemini, id: gemini-3.6-flash}
-  gemini-pro: {provider: gemini, id: gemini-3.1-pro-preview}
+  gpt-4o-mini:
+    provider: openai
+    id: gpt-4o-mini
+    caps: {thinking_mode: none, forced_tool: with_thinking, max_output_tokens: 16384}
+  gpt-4o:
+    provider: openai
+    id: gpt-4o
+    caps: {thinking_mode: none, forced_tool: with_thinking, max_output_tokens: 16384}
+  claude-haiku:
+    provider: anthropic
+    id: claude-haiku-4-5-20251001
+    caps: {thinking_mode: budget, forced_tool: no_thinking, max_output_tokens: 32000}
+  claude-sonnet:
+    provider: anthropic
+    id: claude-sonnet-5-5
+    caps:
+      thinking_mode: adaptive
+      thinking_off: between_tools
+      forced_tool: unsupported
+      max_output_tokens: 64000
+      refusal_fallbacks: true
+  claude-opus:
+    provider: anthropic
+    id: claude-opus-5-5
+    caps:
+      thinking_mode: adaptive
+      thinking_off: unsupported
+      forced_tool: unsupported
+      max_output_tokens: 64000
+      refusal_fallbacks: true
+  # Только явный выбор по логическому имени через API (параметр `model`).
+  # Роутер никогда не выбирает эту модель сам; в публичные списки моделей не включать.
+  # Дорогая (вывод $50 за 1M токенов), thinking всегда включён, принудительный
+  # tool_choice и thinking=disabled дают 400, одна колода ~26 с.
+  claude-fable:
+    provider: anthropic
+    id: claude-fable-5-1
+    explicit_only: true
+    caps:
+      thinking_mode: adaptive
+      thinking_off: unsupported
+      forced_tool: unsupported
+      max_output_tokens: 64000
+  gemini-flash:
+    provider: gemini
+    id: gemini-3.8-flash
+    caps: {thinking_mode: level, thinking_levels: [low, medium, high], forced_tool: with_thinking, max_output_tokens: 32768}
+  gemini-pro:
+    provider: gemini
+    id: gemini-3.1-pro-preview
+    caps: {thinking_mode: level, thinking_levels: [low, medium, high], forced_tool: with_thinking, max_output_tokens: 32768}
+  # Модель классификатора (26/26 на проверочном наборе, самая дешёвая из надёжных).
+  gemini-flash-lite:
+    provider: gemini
+    id: gemini-3.1-flash-lite
+    caps: {thinking_mode: level, thinking_levels: [minimal, low, medium, high], forced_tool: with_thinking, max_output_tokens: 32768}
 
-# Модель генерации изображений (OpenAI Images API) и её таймаут в секундах.
+# --- Цены, USD за 1M токенов ----------------------------------------------------
+# Заполнены только числа, подтверждённые документацией провайдера; null = не подтверждено.
+# Anthropic — официальная таблица цен; OpenAI — страницы моделей; Google — страница цен.
+prices:
+  claude-haiku: {input: 1.0, output: 5.0}
+  claude-sonnet: {input: 2.0, output: 10.0, cache_read: 0.2}
+  claude-opus: {input: 4.0, output: 20.0, cache_read: 0.2}
+  claude-fable: {input: 10.0, output: 50.0}
+  gpt-4o: {input: 2.5, output: 10.0, cache_read: 1.25}
+  gpt-4o-mini: {input: 0.15, output: 0.6, cache_read: 0.075}
+  gemini-flash-lite: {input: 0.25, output: 1.5}
+  gemini-flash: {input: null, output: null}   # страница gemini-3.8-flash цену не отдала
+  gemini-pro: {input: null, output: null}     # страница gemini-3.1-pro-preview цену не отдала
+
+# --- Изображения ---------------------------------------------------------------
+# Одна модель по тесту (2026-10-05, один промпт, 1024x1024): все три дали хороший результат;
+# gpt-image-2.5-sunburst — наивысшее качество по документации и лучшее следование композиции.
 image:
   provider: openai
-  model: gpt-image-2
-  timeout_s: 45
+  model: gpt-image-2.5-sunburst
+  fallback_model: gpt-image-2.5-flare   # при 5xx/таймауте основной модели
+  quality: medium
+  size_default: 1024x1024
+  timeout_s: 300
+  retries: 2
+  # Замер 1024x1024: low 196 токенов (~$0.006, ~12 с), medium 439 (~$0.013, 16 с),
+  # high 1756 (~$0.053, 39 с). Вывод $30 за 1M токенов, вход (текст) $5 за 1M.
+  prices: {text_input: 5.0, image_output: 30.0}
 
-# Тип серверного web-search tool у Anthropic. В установленном SDK есть версии
-# web_search_20250305 (текущая), web_search_20260209 и web_search_20260318.
+# Тип серверного web-search tool Anthropic. web_search_20260318 / 20260209 работают, но
+# используют code execution внутри: ~30k входных токенов и ~14 с против ~12k и ~3,6 с
+# у web_search_20250305 при том же ответе на простой запрос. Для включения динамической
+# фильтрации замените значение на web_search_20260318.
 anthropic_web_search_tool: web_search_20250305
 
+# --- Правила по категориям -----------------------------------------------------
+# model: логическое имя; max_tokens; thinking: off|low|medium|high|max (адаптер переводит
+# в параметры провайдера); forced_tool: инструмент, который обязан быть вызван;
+# timeout_s: таймаут провайдера; web_search; require_human_review -> needs_review в ответе.
 routing_rules:
-  translation:
-    primary: gpt-4o-mini
-    fallback: gemini-flash
-    max_tokens: 2048
-
-  summarization:
-    primary: claude-sonnet
-    fallback: gpt-4o-mini
-    max_tokens: 2048
-
-  rewriting:
-    primary: gpt-4o-mini
-    fallback: gemini-flash
-    max_tokens: 2048
-
+  presentation:
+    {model: claude-sonnet, max_tokens: 32000, thinking: medium, forced_tool: generate_presentation, timeout_s: 600}
+  document:
+    {model: claude-sonnet, max_tokens: 32000, thinking: medium, forced_tool: generate_document, timeout_s: 600}
+  spreadsheet:
+    {model: claude-sonnet, max_tokens: 32000, thinking: medium, forced_tool: generate_spreadsheet, timeout_s: 600}
+  pdf:
+    {model: claude-sonnet, max_tokens: 32000, thinking: medium, forced_tool: generate_pdf, timeout_s: 600}
+  image:
+    {model: claude-sonnet, max_tokens: 8192, thinking: low, forced_tool: generate_image, timeout_s: 600}
+  creative:
+    {model: claude-sonnet, max_tokens: 32000, thinking: medium, timeout_s: 600}
+  code:
+    {model: claude-sonnet, max_tokens: 32000, thinking: medium, timeout_s: 600}
+  # TODO: поднять thinking до high после появления стриминга (SSE): до этого длинные
+  # ответы с thinking=high рискуют упереться в таймауты прокси (nginx 60 с, Cloudflare ~100 с).
   contract_generation:
-    primary: claude-opus
-    fallback: claude-sonnet
-    require_human_review: true
-    max_tokens: 8000
-
+    {model: claude-opus, max_tokens: 32000, thinking: medium, require_human_review: true, timeout_s: 600}
+  # TODO: поднять thinking до high после SSE (см. выше).
+  contract_analysis:
+    {model: claude-opus, max_tokens: 32000, thinking: medium, require_human_review: true, timeout_s: 600}
+  summarization:
+    {model: claude-sonnet, max_tokens: 8192, thinking: low, timeout_s: 600}
   data_analysis:
-    primary: gpt-4o
-    fallback: claude-sonnet
-    max_tokens: 4096
-
+    {model: claude-sonnet, max_tokens: 8192, thinking: medium, timeout_s: 600}
+  translation:
+    {model: claude-haiku, max_tokens: 8192, thinking: "off", timeout_s: 600}
+  rewriting:
+    {model: claude-haiku, max_tokens: 8192, thinking: "off", timeout_s: 600}
   db_query:
-    primary: gemini-flash
-    fallback: gpt-4o-mini
-    max_tokens: 1500
-
+    {model: claude-haiku, max_tokens: 1500, thinking: "off", timeout_s: 600}
   web_search:
-    primary: gpt-4o
-    fallback: claude-sonnet
-    web_search: true
-    max_tokens: 3072
-
+    {model: claude-sonnet, max_tokens: 8192, thinking: low, web_search: true, timeout_s: 600}
   general_qa:
-    primary: gemini-flash
-    fallback: gpt-4o-mini
-    max_tokens: 2048
+    {model: claude-sonnet, max_tokens: 8192, thinking: low, timeout_s: 600}
