@@ -99,9 +99,7 @@ class SQLValidator:
             real_name = table_expr.name
             for qualifier in filter(None, [table_expr.alias, real_name]):
                 if qualifier in alias_map and alias_map[qualifier] != real_name:
-                    raise SQLValidationError(
-                        f"Неоднозначный алиас '{qualifier}' в запросе."
-                    )
+                    raise SQLValidationError(f"Неоднозначный алиас '{qualifier}' в запросе.")
                 alias_map[qualifier] = real_name
         return alias_map
 
@@ -193,7 +191,9 @@ class SQLValidator:
             result.append(col)
         return result
 
-    def _inject_row_level(self, tree: exp.Select, tables: set[str], role: str, user_id: int) -> None:
+    def _inject_row_level(
+        self, tree: exp.Select, tables: set[str], role: str, user_id: int
+    ) -> None:
         for table in tables:
             rule = self._tables[table]
             row_level = rule.get("row_level", {})

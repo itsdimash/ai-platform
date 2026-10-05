@@ -4,10 +4,6 @@ from typing import Any
 from google import genai
 from google.genai import types
 
-from app.utils.docx_builder import create_document_file
-from app.utils.image_builder import generate_and_save_image
-from app.utils.pptx_builder import create_presentation_file
-from app.utils.xlsx_builder import create_spreadsheet_file
 from .base import ALL_TOOLS, Attachment, GenerationResult, ModelAdapter
 
 _PRO_VALID_LEVELS = {"low", "high"}
@@ -19,13 +15,11 @@ class GeminiAdapter(ModelAdapter):
     def __init__(
         self,
         api_key: str,
-        openai_api_key: str | None = None,
-        model: str = "gemini-3.6-flash",
+        model: str,
         thinking_level: str = "minimal",
     ):
         self.name = model
         self.client = genai.Client(api_key=api_key)
-        self.openai_api_key = openai_api_key or api_key
         self.model = model
         self.thinking_level = self._resolve_thinking_level(model, thinking_level)
 
@@ -93,53 +87,10 @@ class GeminiAdapter(ModelAdapter):
         latency_ms = int((time.monotonic() - started) * 1000)
         output_text = response.text or ""
 
-        # Обработка вызова функций в Gemini
-        if response.function_calls:
-            for call in response.function_calls:
-                args = call.args or {}
-                if call.name == "generate_presentation":
-                    file_url = create_presentation_file(
-                        title=args.get("title", "Презентация"),
-                        subtitle=args.get("subtitle", ""),
-                        slides_data=args.get("slides", []),
-                    )
-                    output_text = (
-                        f"📊 Готово! Я сформировал презентацию «**{args.get('title')}**».\n\n"
-                        f"[📥 Скачать презентацию (.pptx)]({file_url})"
-                    )
-                elif call.name == "generate_document":
-                    try:
-                        file_url = create_document_file(
-                            title=args.get("title", "Документ"),
-                            sections=args.get("sections", []),
-                        )
-                        output_text = (
-                            f"📄 Готово! Я сформировал документ «**{args.get('title')}**».\n\n"
-                            f"[📥 Скачать документ (.docx)]({file_url})"
-                        )
-                    except Exception as e:
-                        output_text = f"⚠️ Не удалось сформировать документ. Ошибка: {str(e)}"
-                elif call.name == "generate_spreadsheet":
-                    try:
-                        file_url = create_spreadsheet_file(
-                            filename=args.get("filename", "Таблица"),
-                            sheets=args.get("sheets", []),
-                        )
-                        output_text = (
-                            f"📈 Готово! Я сформировал таблицу «**{args.get('filename')}**».\n\n"
-                            f"[📥 Скачать таблицу (.xlsx)]({file_url})"
-                        )
-                    except Exception as e:
-                        output_text = f"⚠️ Не удалось сформировать таблицу. Ошибка: {str(e)}"
-                elif call.name == "generate_image":
-                    try:
-                        img_url = await generate_and_save_image(
-                            prompt=args.get("prompt", prompt),
-                            size=args.get("size", "1024x1024"),
-                        )
-                        output_text = f"🎨 Вот изображение по вашему запросу:\n\n![Сгенерированное изображение]({img_url})"
-                    except Exception as e:
-                        output_text = f"⚠️ Не удалось сгенерировать изображение. Ошибка: {str(e)}"
+        tool_calls = [
+            {"name": call.name or "", "args": dict(call.args or {})}
+            for call in (response.function_calls or [])
+        ]
 
         usage = response.usage_metadata
         tokens_in = usage.prompt_token_count or 0 if usage else 0
@@ -151,6 +102,7 @@ class GeminiAdapter(ModelAdapter):
             tokens_out=tokens_out,
             latency_ms=latency_ms,
             raw={"model": self.model},
+            tool_calls=tool_calls,
         )
 
     @staticmethod

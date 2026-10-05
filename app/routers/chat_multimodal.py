@@ -1,186 +1,144 @@
-"""Мультимодальный чат: произвольный промпт + изображения / PDF, которые
-модель обрабатывает НАТИВНО (vision, document blocks), а не через
-pdfplumber-extraction.
+"""Мультимодальный чат: произвольный промпт + изображения / PDF / docx / xlsx.
 
 Отдельный роут POST /v1/chat/multimodal — существующий JSON-роут
 POST /v1/chat не трогается вообще (его контракт неизменен).
 
 Отличия от /v1/chat:
-- принимает multipart/form-data (prompt, session_id, model, files[]);
+- принимает multipart/form-data (prompt, session_id, model, files[], attachment_keys[]);
 - если в запросе есть изображения ИЛИ PDF, который решено слать нативно,
   КЛАССИФИКАТОР ПРОПУСКАЕТСЯ полностью: модель = body.model, если задан,
   иначе дефолт gemini-flash. task_type / routing_rules при этом не
   участвуют (task_type в логе помечается как "multimodal");
-- db_query в этом роуте не выполняется (запрос к БД + вложение — не
-  наш кейс); PDF, отправленный не нативно (GPT-модель), конвертируется
-  в текст и вклеивается в prompt здесь, на бэкенде.
+- db_query в этом роуте не выполняется (запрос к БД + вложение — не наш кейс).
 
-Хранение вложений: НЕ сохраняются ни на диск, ни в БД — живут только в
-памяти на время обработки запроса. В chat_messages.content пишется
-только исходный текст пользователя + пометка «было приложено N вложений».
-ИЗВЕСТНОЕ ОГРАНИЧЕНИЕ: при follow-up вопросах по истории модель эти вложения
-больше не видит — история подмешивается текстом (см. adapters/base.py),
-а base64 картинок/PDF туда намеренно не кладётся.
+Что принимается (utils/uploads.py): png, jpg/jpeg, webp, pdf, docx, xlsx; до 10
+файлов, изображение до 20 МБ, документ до 50 МБ, всё вместе до 100 МБ. Тип
+определяется по расширению + magic bytes (Content-Type клиента не используется).
+Файлы читаются кусками по 1 МБ с остановкой при превышении лимита.
 
-docx/xlsx этот роут не обрабатывает — они остаются на старом пути
-POST /v1/documents/extract + вклейка текста фронтом. Комбинация
-«docx-текст (уже в prompt) + фото (attachment)» в одном запросе
-поддерживается: текст приходит строкой в prompt, изображения — файлами.
+Как вложения доходят до модели (utils/media.py):
+- изображения — нативно; если не проходят по лимитам провайдера (Anthropic: 7,5 МБ
+  сырых / 8000 px по стороне; общий бюджет запроса у всех провайдеров), провайдеру
+  уходит уменьшенная копия (Pillow), а в R2 сохраняется оригинал;
+- PDF — нативно у Claude/Gemini, если влезает в лимиты провайдера (размер, число
+  страниц, бюджет запроса); иначе (и всегда у OpenAI) — текстовый слой, вклеенный в prompt;
+- docx/xlsx — текст извлекается на бэкенде и вклеивается в prompt.
+
+Хранение вложений: после УСПЕШНОЙ генерации исходные файлы сохраняются в R2 под
+ai/{user_id}/{session_id}/uploads/... и привязываются к user-сообщению
+(chat_messages.attachments), чтобы фронт восстановил их из истории. Модель при
+follow-up по истории сами вложения не видит — история подмешивается текстом
+(см. adapters/base.py), а base64 картинок/PDF туда намеренно не кладётся.
 """
+
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..adapters.anthropic_adapter import AnthropicAdapter
 from ..adapters.base import Attachment, ModelAdapter
+from ..adapters.gemini_adapter import GeminiAdapter
+from ..adapters.openai_adapter import OpenAIAdapter
 from ..auth import CurrentUser, get_current_user
 from ..classifier.classify import Classification, classify
 from ..db.session import get_db
+from ..limits import (
+    MAX_ATTACHMENT_KEYS,
+    MAX_EXTRACTED_CHARS_PER_FILE,
+    MAX_EXTRACTED_CHARS_TOTAL,
+    MAX_FILES_PER_REQUEST,
+    MAX_TOTAL_UPLOAD_BYTES,
+)
 from ..models.chat import ChatMessage
 from ..models.logs import AIRequestLog
 from ..system_prompt import SYSTEM_PROMPT
+from ..tools import ToolContext, apply_tool_calls
+from ..utils.attachments import resolve_attachment_keys, store_user_upload, with_urls
+from ..utils.media import (
+    PROVIDER_ANTHROPIC,
+    PROVIDER_GEMINI,
+    PROVIDER_OPENAI,
+    plan_media,
+)
+from ..utils.pdf import extract_pdf_pages, pdf_page_count
+from ..utils.uploads import ParsedFile, classify_upload, read_upload
 from .chat import (
     _build_contextual_prompt,
     _get_or_create_session,
     _get_recent_history,
     _route_engine,
+    describe_failure,
+    fail_request,
+    touch_session,
 )
 from .deps import get_adapters
+from .document_extract import _extract_docx, _extract_xlsx
 from .schemas import ChatResponse
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter()
-
-# --- Лимиты и валидация (обязательно на бэкенде, фронту не доверяем) --------
-
-MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 МБ на одно изображение
-MAX_IMAGES_PER_MESSAGE = 4
-MAX_TOTAL_ATTACHMENT_BYTES = 15 * 1024 * 1024  # суммарно по всем вложениям запроса
-
-# Провайдерские лимиты inline-передачи PDF (без Files API), для справки —
-# общий потолок запроса (15 МБ выше) в любом случае жёстче:
-#   Anthropic  : ~32 МБ и до 100 страниц на документ;
-#   Gemini     : суммарный размер запроса с inline_data < 20 МБ.
-ANTHROPIC_INLINE_PDF_MAX_BYTES = 32 * 1024 * 1024
-GEMINI_INLINE_REQUEST_MAX_BYTES = 20 * 1024 * 1024
-
-MAX_EXTRACTED_PDF_CHARS = 60_000  # поднято с 20_000 — модели легко тянут больше контекста,
-# прежнее значение резало содержимое многостраничных PDF без явного предупреждения в UI
 
 # Эвристика «скан / сложная вёрстка»: если текстовый слой даёт меньше
 # символов на страницу, чем этот порог, — PDF почти наверняка скан или
 # тяжёлая вёрстка, и pdfplumber-текст будет бесполезен.
 PDF_SCAN_CHARS_PER_PAGE_THRESHOLD = 100
 
-# Логические модели из MODEL_FACTORY, умеющие нативный PDF (document block).
-# OpenAI Chat Completions нативного PDF не умеет — для неё PDF идёт текстом.
-_NATIVE_PDF_MODELS = {
-    "claude-haiku",
-    "claude-sonnet",
-    "claude-opus",
-    "gemini-flash",
-    "gemini-pro",
-}
-
 DEFAULT_MULTIMODAL_MODEL = "gemini-flash"  # когда body.model не задан
 
 
-def _supports_native_pdf(model_name: str) -> bool:
-    return model_name in _NATIVE_PDF_MODELS
-
-
-def _sniff_mime(content: bytes) -> str | None:
-    """Определяет тип по magic bytes (не по расширению). Возвращает один из
-    image/png, image/jpeg, image/webp, application/pdf либо None для всего
-    остального."""
-    if content.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if content.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if content[:4] == b"RIFF" and content[8:12] == b"WEBP":
-        return "image/webp"
-    if content.startswith(b"%PDF-"):
-        return "application/pdf"
+def _provider_of(adapter: ModelAdapter | None) -> str | None:
+    if isinstance(adapter, AnthropicAdapter):
+        return PROVIDER_ANTHROPIC
+    if isinstance(adapter, GeminiAdapter):
+        return PROVIDER_GEMINI
+    if isinstance(adapter, OpenAIAdapter):
+        return PROVIDER_OPENAI
     return None
 
 
-def _looks_like_svg(content: bytes) -> bool:
-    head = content[:512].lstrip().lower()
-    return head.startswith(b"<?xml") or b"<svg" in head
+def _supports_native_pdf(adapter: ModelAdapter | None) -> bool:
+    """Claude и Gemini принимают PDF нативно; OpenAI Chat Completions — нет."""
+    return _provider_of(adapter) in (PROVIDER_ANTHROPIC, PROVIDER_GEMINI)
 
 
-class _ParsedFile:
-    __slots__ = ("data", "filename", "mime")
+async def _read_and_validate(files: list[UploadFile] | None) -> list[ParsedFile]:
+    """Читает файлы кусками, валидирует расширение + magic bytes и лимиты.
+    Любое нарушение — HTTP 400."""
+    uploads = files or []
+    if len(uploads) > MAX_FILES_PER_REQUEST:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"Не больше {MAX_FILES_PER_REQUEST} файлов в одном сообщении",
+        )
 
-    def __init__(self, filename: str, data: bytes, mime: str):
-        self.filename = filename
-        self.data = data
-        self.mime = mime
-
-
-async def _read_and_validate(
-    files: list[UploadFile] | None,
-) -> tuple[list[_ParsedFile], list[_ParsedFile]]:
-    """Читает файлы в память, валидирует по magic bytes и лимитам.
-    Возвращает (images, pdfs). Любое нарушение — HTTP 400."""
-    images: list[_ParsedFile] = []
-    pdfs: list[_ParsedFile] = []
+    parsed: list[ParsedFile] = []
     total = 0
-
-    for upload in files or []:
-        raw = await upload.read()
+    for upload in uploads:
+        raw = await read_upload(upload, total_so_far=total, max_total=MAX_TOTAL_UPLOAD_BYTES)
         if not raw:
             continue
-
         total += len(raw)
-        if total > MAX_TOTAL_ATTACHMENT_BYTES:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                detail="Суммарный размер вложений превышает 15 МБ",
-            )
-
-        name = upload.filename or "attachment"
-
-        if _looks_like_svg(raw):
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                detail=f"SVG не поддерживается: {name!r}",
-            )
-
-        mime = _sniff_mime(raw)
-        if mime is None:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST,
-                detail=f"Неподдерживаемый тип файла {name!r}. Разрешены: PNG, JPEG, WebP, PDF",
-            )
-
-        if mime == "application/pdf":
-            pdfs.append(_ParsedFile(name, raw, mime))
-        else:
-            if len(raw) > MAX_IMAGE_BYTES:
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    detail=f"Изображение {name!r} больше 5 МБ",
-                )
-            if len(images) >= MAX_IMAGES_PER_MESSAGE:
-                raise HTTPException(
-                    status.HTTP_400_BAD_REQUEST,
-                    detail="Не больше 4 изображений в одном сообщении",
-                )
-            images.append(_ParsedFile(name, raw, mime))
-
-    return images, pdfs
+        parsed.append(classify_upload(upload.filename, raw))
+    return parsed
 
 
-def _extract_pdf_text_and_pages(content: bytes) -> tuple[str, int]:
-    """Текстовый слой PDF (склеенный через "\\n") + число страниц с текстом —
-    для эвристики «скан vs текстовый PDF». Парсинг — общий
-    app.utils.pdf.extract_pdf_pages (то же, что и в document_extract)."""
-    from app.utils.pdf import extract_pdf_pages
-
-    pages = extract_pdf_pages(content)
+def _pdf_text(data: bytes) -> tuple[str, int]:
+    """Текстовый слой PDF (через "\\n") + число страниц с текстом."""
+    pages = extract_pdf_pages(data)
     return "\n".join(pages), len(pages)
+
+
+def _safe_page_count(data: bytes) -> int:
+    try:
+        return pdf_page_count(data)
+    except Exception:  # noqa: BLE001 — битый PDF не должен ронять весь запрос; решит провайдер
+        return 0
 
 
 def _parse_session_id(session_id: str | None) -> int | None:
@@ -194,12 +152,27 @@ def _parse_session_id(session_id: str | None) -> int | None:
         ) from exc
 
 
+class _TextBudget:
+    """Общий потолок на текст, вклеиваемый в промпт из всех документов запроса."""
+
+    def __init__(self) -> None:
+        self.remaining = MAX_EXTRACTED_CHARS_TOTAL
+
+    def take(self, text: str) -> tuple[str, bool]:
+        limit = min(MAX_EXTRACTED_CHARS_PER_FILE, self.remaining)
+        snippet = text[:limit]
+        self.remaining -= len(snippet)
+        return snippet, len(text) > len(snippet)
+
+
 @router.post("/v1/chat/multimodal", response_model=ChatResponse)
 async def chat_multimodal(
     prompt: str = Form(...),
     session_id: str | None = Form(None),
     model: str | None = Form(None),
     files: list[UploadFile] | None = File(None),
+    # Ключи файлов, ранее загруженных через /v1/documents/extract (file_key).
+    attachment_keys: list[str] | None = Form(None),
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     adapters: dict[str, ModelAdapter] = Depends(get_adapters),
@@ -209,13 +182,28 @@ async def chat_multimodal(
     body_model = model.strip() if model and model.strip() else None
     sid = _parse_session_id(session_id)
 
-    images, pdfs = await _read_and_validate(files)
+    # Как и в /v1/chat (там это 422 от схемы): лишние ключи не отбрасываем молча.
+    keys = attachment_keys or []
+    if len(keys) > MAX_ATTACHMENT_KEYS:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=f"Не больше {MAX_ATTACHMENT_KEYS} ключей вложений в одном сообщении",
+        )
+
+    parsed = await _read_and_validate(files)
+    images = [f for f in parsed if f.kind == "image"]
+    pdfs = [f for f in parsed if f.kind == "pdf"]
+    office_docs = [f for f in parsed if f.kind in ("docx", "xlsx")]
+
+    # Только привязка: по ключам проверяется владелец и существование (HEAD), текст
+    # документа в промпт НЕ извлекается — клиент вклеивает его сам (см. /extract).
+    key_attachments = await resolve_attachment_keys(keys, user.user_id)
     has_images = len(images) > 0
 
     # --- Роутинг ----------------------------------------------------------
     # Кандидат модели без классификатора: явный выбор пользователя или дефолт.
     candidate_model = body_model or DEFAULT_MULTIMODAL_MODEL
-    send_pdf_native = bool(pdfs) and _supports_native_pdf(candidate_model)
+    send_pdf_native = bool(pdfs) and _supports_native_pdf(adapters.get(candidate_model))
 
     # Классификатор пропускается, если есть изображения ИЛИ PDF, который
     # решено слать нативно (см. ТЗ). Иначе (PDF + не-нативная модель, либо
@@ -231,6 +219,7 @@ async def chat_multimodal(
         confidence = 0.0
         used_fallback_confidence = False
         web_search = False
+        needs_review = False
         max_tokens = _route_engine.default_max_tokens
     else:
         contextual_for_classify = _build_contextual_prompt(history_messages, prompt)
@@ -246,97 +235,177 @@ async def chat_multimodal(
             rule = _route_engine.rule_for(task_type)
             model_name = body_model
             web_search = rule.get("web_search", False)
+            needs_review = rule.get("require_human_review", False)
             used_fallback_confidence = False
             max_tokens = rule.get("max_tokens", _route_engine.default_max_tokens)
         else:
             decision = _route_engine.decide(task_type, confidence)
             model_name = decision.model
             web_search = decision.web_search
+            needs_review = decision.require_human_review
             used_fallback_confidence = decision.used_fallback_confidence
             max_tokens = decision.max_tokens
 
     if model_name not in adapters:
-        _latency = int((time.monotonic() - started) * 1000)
-        db.add(ChatMessage(session_id=session.id, role="user", content=prompt))
-        db.add(
-            AIRequestLog(
-                user_id=user.user_id,
-                session_id=session.id,
-                task_type=task_type,
-                confidence=confidence,
-                used_fallback_confidence=used_fallback_confidence,
-                model_used=model_name,
-                tokens_in=0,
-                tokens_out=0,
-                latency_ms=_latency,
-                status="error",
-                error_message=f"Неизвестная модель: {model_name!r}",
-            )
+        await fail_request(
+            db,
+            user_id=user.user_id,
+            session_id=session.id,
+            session_created=sid is None,
+            task_type=task_type,
+            confidence=confidence,
+            used_fallback_confidence=used_fallback_confidence,
+            model_used=model_name,
+            started=started,
+            status_code=400,
+            detail=f"Неизвестная модель: {model_name!r}",
+            error_message=f"Неизвестная модель: {model_name!r}",
         )
-        await db.commit()
-        raise HTTPException(status_code=400, detail=f"Неизвестная модель: {model_name!r}")
 
-    # --- Сборка вложений и итогового промпта -----------------------------
+    adapter = adapters[model_name]
+    # В model_used пишем РЕАЛЬНЫЙ ID модели провайдера (см. routers/chat.py).
+    model_id = adapter.model
+    provider = _provider_of(adapter) or PROVIDER_OPENAI
+
+    # --- Подготовка вложений под лимиты провайдера ---------------------------
+    # Pillow / pdfplumber — CPU-тяжёлые, при файлах до 50 МБ их нельзя гонять в
+    # event loop. Ошибки валидации (HTTPException) пробрасываются как 400.
+    pdf_pages = [await asyncio.to_thread(_safe_page_count, p.data) for p in pdfs]
+    try:
+        plan = await asyncio.to_thread(
+            plan_media,
+            provider,
+            images=images,
+            pdfs=pdfs,
+            pdf_pages=pdf_pages,
+            is_200k_context="haiku" in model_id.lower(),
+        )
+    except HTTPException as exc:
+        # Сессия создана этим запросом — не оставляем пустой чат.
+        await fail_request(
+            db,
+            user_id=user.user_id,
+            session_id=session.id,
+            session_created=sid is None,
+            task_type=task_type,
+            confidence=confidence,
+            used_fallback_confidence=used_fallback_confidence,
+            model_used=model_id,
+            started=started,
+            status_code=exc.status_code,
+            detail=str(exc.detail),
+            error_message=str(exc.detail)[:500],
+        )
+    if plan.resized_names:
+        logger.info("images downscaled for %s: %d", provider, len(plan.resized_names))
+
     attachments: list[Attachment] = [
-        Attachment(mime_type=img.mime, data=img.data, kind="image") for img in images
+        Attachment(mime_type=img.mime, data=img.data, kind="image") for img in plan.images
+    ]
+    attachments += [
+        Attachment(mime_type="application/pdf", data=pdf.data, kind="pdf_document")
+        for pdf in plan.native_pdfs
     ]
 
+    # Текстовый путь: PDF вне лимитов провайдера (и все PDF у OpenAI), docx, xlsx.
+    budget = _TextBudget()
     prompt_suffix_parts: list[str] = []
-    native_pdf_count = 0
-    for pdf in pdfs:
+    native_provider = _supports_native_pdf(adapter)
+
+    for pdf in plan.text_pdfs:
         try:
-            text, pages = _extract_pdf_text_and_pages(pdf.data)
+            text, text_pages = await asyncio.to_thread(_pdf_text, pdf.data)
         except Exception:  # noqa: BLE001 — битый PDF не должен ронять весь запрос
-            text, pages = "", 0
-
-        chars_per_page = len(text) / pages if pages else 0.0
-        scan_like = pages == 0 or chars_per_page < PDF_SCAN_CHARS_PER_PAGE_THRESHOLD
-
-        if _supports_native_pdf(model_name):
-            # Claude / Gemini — всегда нативно, качество не зависит от
-            # текстового слоя.
-            attachments.append(
-                Attachment(mime_type="application/pdf", data=pdf.data, kind="pdf_document")
-            )
-            native_pdf_count += 1
-        else:
-            # OpenAI: нативного PDF нет. Дефолт из ТЗ — fallback на
-            # pdfplumber-текст с пометкой о возможном низком качестве.
+            text, text_pages = "", 0
+        chars_per_page = len(text) / text_pages if text_pages else 0.0
+        scan_like = text_pages == 0 or chars_per_page < PDF_SCAN_CHARS_PER_PAGE_THRESHOLD
+        snippet, was_truncated = budget.take(text)
+        if native_provider:
+            note = " (слишком велик для нативной передачи модели — передан текстовый слой)"
+        elif scan_like:
             # TODO: чтобы поддержать сканы в GPT, рендерить страницы PDF
             # в PNG и слать их как image-вложения (pdf2image / pymupdf).
-            snippet = text[:MAX_EXTRACTED_PDF_CHARS]
             note = (
                 " (низкое качество: похоже на скан/сложную вёрстку, "
                 "для таких файлов выберите Claude или Gemini)"
-                if scan_like
-                else ""
             )
-            truncated = " [обрезано]" if len(text) > MAX_EXTRACTED_PDF_CHARS else ""
-            prompt_suffix_parts.append(
-                f"\n\n=== Содержимое PDF «{pdf.filename}»{note}{truncated} ===\n{snippet}"
-            )
+        else:
+            note = ""
+        if native_provider and scan_like:
+            note += "; похоже на скан — текст может быть неполным"
+        marker = " [обрезано]" if was_truncated else ""
+        prompt_suffix_parts.append(
+            f"\n\n=== Содержимое PDF «{pdf.filename}»{note}{marker} ===\n{snippet}"
+        )
+
+    for doc in office_docs:
+        extractor = _extract_docx if doc.kind == "docx" else _extract_xlsx
+        try:
+            text = await asyncio.to_thread(extractor, doc.data)
+        except Exception:  # noqa: BLE001 — битый документ не должен ронять весь запрос
+            text = ""
+        snippet, was_truncated = budget.take(text)
+        marker = " [обрезано]" if was_truncated else ""
+        label = "DOCX" if doc.kind == "docx" else "XLSX"
+        prompt_suffix_parts.append(
+            f"\n\n=== Содержимое {label} «{doc.filename}»{marker} ===\n{snippet}"
+        )
 
     final_prompt = prompt + "".join(prompt_suffix_parts)
     contextual_prompt = _build_contextual_prompt(history_messages, final_prompt)
 
     # --- Вызов модели ---------------------------------------------------
-    status_str = "success"
-    error_message = None
     try:
-        result = await adapters[model_name].generate(
+        result = await adapter.generate(
             prompt=contextual_prompt,
             system=SYSTEM_PROMPT,
             web_search=web_search,
             max_tokens=max_tokens,
             attachments=attachments or None,
         )
-        text_out = result.text
-        tokens_in, tokens_out = result.tokens_in, result.tokens_out
-    except Exception as exc:  # noqa: BLE001 — любая ошибка идёт в лог, а не 500 без следа
-        status_str = "error"
-        error_message = str(exc)[:500]
-        text_out = "Не удалось обработать запрос. Попробуйте ещё раз."
-        tokens_in = tokens_out = 0
+        # Файловые tools исполняются здесь (сбой -> ToolExecutionError -> 5xx).
+        result = await apply_tool_calls(
+            result,
+            ctx=ToolContext(user_id=user.user_id, session_id=session.id),
+            prompt=contextual_prompt,
+        )
+    except Exception as exc:  # noqa: BLE001 — любая ошибка провайдера/билдера -> 5xx + запись в лог
+        status_code, detail, error_message = describe_failure(exc)
+        await fail_request(
+            db,
+            user_id=user.user_id,
+            session_id=session.id,
+            session_created=sid is None,
+            task_type=task_type,
+            confidence=confidence,
+            used_fallback_confidence=used_fallback_confidence,
+            model_used=model_id,
+            started=started,
+            status_code=status_code,
+            detail=detail,
+            error_message=error_message,
+        )
+    text_out = result.text
+    ai_attachments = result.attachments
+    tokens_in, tokens_out = result.tokens_in, result.tokens_out
+
+    # --- Исходные файлы пользователя -> R2 (ПОСЛЕ успешной генерации: упавший
+    # запрос не оставляет объектов; сохраняются ОРИГИНАЛЫ, не уменьшенные копии).
+    # Сбой заливки не теряет уже оплаченный ответ: сообщение сохраняется без этих
+    # вложений, причина — в error_message лога.
+    stored = await asyncio.gather(
+        *(store_user_upload(user.user_id, session.id, f.filename, f.data, f.mime) for f in parsed),
+        return_exceptions=True,
+    )
+    uploaded_records = [r for r in stored if isinstance(r, dict)]
+    upload_failures = len(stored) - len(uploaded_records)
+    user_attachments = [*key_attachments, *uploaded_records]
+    notes: list[str] = []
+    if upload_failures:
+        notes.append(f"Не сохранены вложения пользователя в R2: {upload_failures} из {len(stored)}")
+    if plan.resized_names:
+        notes.append(f"Изображений уменьшено для провайдера: {len(plan.resized_names)}")
+    warning = "; ".join(notes) or None
 
     latency_ms = int((time.monotonic() - started) * 1000)
 
@@ -344,11 +413,12 @@ async def chat_multimodal(
     attach_note_bits: list[str] = []
     if images:
         attach_note_bits.append(f"{len(images)} изображение(й)")
-    if native_pdf_count:
-        attach_note_bits.append(f"{native_pdf_count} PDF (нативно)")
-    text_pdf_count = len(pdfs) - native_pdf_count
-    if text_pdf_count:
-        attach_note_bits.append(f"{text_pdf_count} PDF (текстом)")
+    if plan.native_pdfs:
+        attach_note_bits.append(f"{len(plan.native_pdfs)} PDF (нативно)")
+    if plan.text_pdfs:
+        attach_note_bits.append(f"{len(plan.text_pdfs)} PDF (текстом)")
+    if office_docs:
+        attach_note_bits.append(f"{len(office_docs)} документ(ов) docx/xlsx (текстом)")
 
     user_content = prompt
     if attach_note_bits:
@@ -357,16 +427,25 @@ async def chat_multimodal(
             f"Вложения обработаны в этом запросе; при follow-up по истории модель их не видит.]"
         )
 
-    db.add(ChatMessage(session_id=session.id, role="user", content=user_content))
+    db.add(
+        ChatMessage(
+            session_id=session.id,
+            role="user",
+            content=user_content,
+            attachments=user_attachments,
+        )
+    )
     db.add(
         ChatMessage(
             session_id=session.id,
             role="ai",
             content=text_out,
-            model_used=model_name,
+            model_used=model_id,
             task_type=task_type,
+            attachments=ai_attachments,
         )
     )
+    await touch_session(db, session.id)
     db.add(
         AIRequestLog(
             user_id=user.user_id,
@@ -374,12 +453,12 @@ async def chat_multimodal(
             task_type=task_type,
             confidence=confidence,
             used_fallback_confidence=used_fallback_confidence,
-            model_used=model_name,
+            model_used=model_id,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             latency_ms=latency_ms,
-            status=status_str,
-            error_message=error_message,
+            status="success",
+            error_message=warning,
         )
     )
     await db.commit()
@@ -388,10 +467,12 @@ async def chat_multimodal(
         session_id=session.id,
         text=text_out,
         task_type=task_type,
-        model_used=model_name,
+        model_used=model_id,
         confidence=confidence,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         latency_ms=latency_ms,
         table=None,
+        needs_review=needs_review,
+        attachments=with_urls(ai_attachments),
     )

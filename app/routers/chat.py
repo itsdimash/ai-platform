@@ -2,9 +2,10 @@ import re
 import time
 from datetime import date, datetime
 from decimal import Decimal
+from typing import NoReturn
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..adapters.base import ModelAdapter
@@ -17,6 +18,8 @@ from ..models.chat import ChatMessage, ChatSession
 from ..models.logs import AIRequestLog
 from ..router.route import RouteDecision, Router
 from ..system_prompt import SYSTEM_PROMPT
+from ..tools import ToolContext, ToolExecutionError, apply_tool_calls
+from ..utils.attachments import resolve_attachment_keys, with_urls
 from .deps import get_adapters
 from .schemas import ChatRequest, ChatResponse
 
@@ -45,6 +48,9 @@ async def chat(
     # а не отдельными "турнами" в API провайдера. В историю сохраняется
     # ОРИГИНАЛЬНЫЙ body.prompt (не contextual_prompt) — иначе контекст
     # задваивался бы на каждом следующем сообщении.
+    # Ключи ранее загруженных файлов проверяем ДО создания сессии и до трат на модель.
+    user_attachments = await resolve_attachment_keys(body.attachment_keys, user.user_id)
+
     session = await _get_or_create_session(db, body.session_id, user.user_id, body.prompt)
     history_messages = await _get_recent_history(db, session.id)
     contextual_prompt = _build_contextual_prompt(history_messages, body.prompt)
@@ -55,7 +61,9 @@ async def chat(
     try:
         classification = await classify(contextual_prompt, adapters["gemini-flash"])
     except Exception:  # noqa: BLE001 — намеренно широкий catch, см. комментарий выше
-        classification = Classification(task_type="general_qa", confidence=0.0, reasoning="classifier_call_failed")
+        classification = Classification(
+            task_type="general_qa", confidence=0.0, reasoning="classifier_call_failed"
+        )
 
     # 2. Роутинг — выбор целевой модели по конфигу, если пользователь сам не
     # указал модель явно (body.model). Ручной выбор полностью обходит
@@ -79,74 +87,101 @@ async def chat(
     else:
         decision = _route_engine.decide(classification.task_type, classification.confidence)
 
+    session_created = body.session_id is None
+
     # Опечатка/рассинхрон в config.yaml (модель не зарегистрирована в
     # адаптерах) — явная ошибка вместо сырого KeyError глубже в коде.
     if decision.model not in adapters:
-        status = "error"
-        error_message = f"Модель '{decision.model}' из конфига роутера не зарегистрирована в adapters."
-        latency_ms = int((time.monotonic() - started) * 1000)
-        db.add(ChatMessage(session_id=session.id, role="user", content=body.prompt))
-        db.add(
-            AIRequestLog(
-                user_id=user.user_id,
-                session_id=session.id,
-                task_type=classification.task_type,
-                confidence=classification.confidence,
-                used_fallback_confidence=decision.used_fallback_confidence,
-                model_used=decision.model,
-                tokens_in=0,
-                tokens_out=0,
-                latency_ms=latency_ms,
-                status=status,
-                error_message=error_message,
-            )
+        await fail_request(
+            db,
+            user_id=user.user_id,
+            session_id=session.id,
+            session_created=session_created,
+            task_type=classification.task_type,
+            confidence=classification.confidence,
+            used_fallback_confidence=decision.used_fallback_confidence,
+            model_used=decision.model,
+            started=started,
+            status_code=500,
+            detail="Ошибка конфигурации модели. Мы уже знаем об этом.",
+            error_message=(
+                f"Модель '{decision.model}' из конфига роутера не зарегистрирована в adapters."
+            ),
         )
-        await db.commit()
-        raise HTTPException(status_code=500, detail="Ошибка конфигурации модели. Мы уже знаем об этом.")
+
+    adapter = adapters[decision.model]
+    # В model_used (лог, история, ответ) пишем РЕАЛЬНЫЙ ID модели провайдера;
+    # логическое имя остаётся ключом роутера и значением параметра запроса `model`.
+    model_id = adapter.model
 
     # 3. Выполнение задачи
     table_result: list[dict] | None = None
-    status = "success"
-    error_message = None
+    ai_attachments: list[dict] = []
 
     try:
         if classification.task_type == "db_query" and not decision.used_fallback_confidence:
             text_out, table_result, tokens_in, tokens_out = await _handle_db_query(
-                contextual_prompt, user, adapters[decision.model]
+                contextual_prompt, user, adapter
             )
         else:
-            adapter = adapters[decision.model]
             result = await adapter.generate(
                 prompt=contextual_prompt,
                 system=SYSTEM_PROMPT,
                 web_search=decision.web_search,
                 max_tokens=decision.max_tokens,
             )
+            # Файловые tools исполняются здесь (сбой -> ToolExecutionError -> 5xx).
+            result = await apply_tool_calls(
+                result,
+                ctx=ToolContext(user_id=user.user_id, session_id=session.id),
+                prompt=contextual_prompt,
+            )
             text_out = result.text
+            ai_attachments = result.attachments
             tokens_in, tokens_out = result.tokens_in, result.tokens_out
-    except Exception as e:  # noqa: BLE001 — намеренно широкий catch: любая ошибка
-        # должна попасть в лог, а не уронить запрос без следа
-        status = "error"
-        error_message = str(e)[:500]
-        text_out = "Не удалось обработать запрос. Попробуйте ещё раз."
-        tokens_in = tokens_out = 0
+    except Exception as e:  # noqa: BLE001 — любая ошибка провайдера/билдера -> 5xx + запись в лог
+        status_code, detail, error_message = describe_failure(e)
+        await fail_request(
+            db,
+            user_id=user.user_id,
+            session_id=session.id,
+            session_created=session_created,
+            task_type=classification.task_type,
+            confidence=classification.confidence,
+            used_fallback_confidence=decision.used_fallback_confidence,
+            model_used=model_id,
+            started=started,
+            status_code=status_code,
+            detail=detail,
+            error_message=error_message,
+        )
 
     latency_ms = int((time.monotonic() - started) * 1000)
 
     # 4. История чатов — сохраняем оба сообщения (сессия уже резолвлена в
     # шаге 0). ВАЖНО: content=body.prompt, а не contextual_prompt — в базу
-    # идёт только то, что реально написал пользователь.
-    db.add(ChatMessage(session_id=session.id, role="user", content=body.prompt))
+    # идёт только то, что реально написал пользователь. Сюда доходим только
+    # при успехе: сбои в историю не попадают (см. fail_request).
+    db.add(
+        ChatMessage(
+            session_id=session.id,
+            role="user",
+            content=body.prompt,
+            attachments=user_attachments,
+        )
+    )
     db.add(
         ChatMessage(
             session_id=session.id,
             role="ai",
             content=text_out,
-            model_used=decision.model,
+            model_used=model_id,
             task_type=classification.task_type,
             table_data=table_result,
+            attachments=ai_attachments,
         )
     )
+    await touch_session(db, session.id)
 
     # 5. Логирование — с первого дня, не после
     db.add(
@@ -156,12 +191,12 @@ async def chat(
             task_type=classification.task_type,
             confidence=classification.confidence,
             used_fallback_confidence=decision.used_fallback_confidence,
-            model_used=decision.model,
+            model_used=model_id,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             latency_ms=latency_ms,
-            status=status,
-            error_message=error_message,
+            status="success",
+            error_message=None,
         )
     )
     await db.commit()
@@ -170,13 +205,88 @@ async def chat(
         session_id=session.id,
         text=text_out,
         task_type=classification.task_type,
-        model_used=decision.model,
+        model_used=model_id,
         confidence=classification.confidence,
         tokens_in=tokens_in,
         tokens_out=tokens_out,
         latency_ms=latency_ms,
         table=table_result,
+        needs_review=decision.require_human_review,
+        attachments=with_urls(ai_attachments),
     )
+
+
+async def touch_session(db: AsyncSession, session_id: int) -> None:
+    """Обновляет ChatSession.updated_at при добавлении сообщений (ORM onupdate
+    срабатывает только при изменении самой строки сессии, поэтому раньше список
+    чатов не сортировался по последней активности)."""
+    await db.execute(
+        update(ChatSession).where(ChatSession.id == session_id).values(updated_at=func.now())
+    )
+
+
+def describe_failure(exc: Exception) -> tuple[int, str, str]:
+    """(HTTP-статус, безопасное сообщение пользователю, текст для лога).
+    В detail никогда не попадает текст исключения — только в error_message лога."""
+    if isinstance(exc, ToolExecutionError):
+        return (
+            500,
+            "Не удалось сформировать файл. Попробуйте ещё раз.",
+            f"{type(exc.cause).__name__} в {exc.tool_name}: {exc.cause}"[:500],
+        )
+    return (
+        502,
+        "Не удалось обработать запрос: сервис модели недоступен. Попробуйте ещё раз.",
+        f"{type(exc).__name__}: {exc}"[:500],
+    )
+
+
+async def fail_request(
+    db: AsyncSession,
+    *,
+    user_id: int,
+    session_id: int,
+    session_created: bool,
+    task_type: str,
+    confidence: float,
+    used_fallback_confidence: bool,
+    model_used: str,
+    started: float,
+    status_code: int,
+    detail: str,
+    error_message: str,
+) -> NoReturn:
+    """Фиксирует сбой запроса и отвечает 5xx.
+
+    Сбой НЕ попадает в историю чата: ни сообщение ассистента, ни сообщение
+    пользователя не сохраняются (повтор запроса не плодит дубли реплик). Если
+    сессия была создана этим же запросом — откатываем её, чтобы не оставлять в
+    списке чатов пустую сессию; тогда в логе session_id=None. Реальная причина
+    пишется только в ai_request_logs.error_message.
+    """
+    if session_created:
+        await db.rollback()
+        log_session_id = None
+    else:
+        log_session_id = session_id
+
+    db.add(
+        AIRequestLog(
+            user_id=user_id,
+            session_id=log_session_id,
+            task_type=task_type,
+            confidence=confidence,
+            used_fallback_confidence=used_fallback_confidence,
+            model_used=model_used,
+            tokens_in=0,
+            tokens_out=0,
+            latency_ms=int((time.monotonic() - started) * 1000),
+            status="error",
+            error_message=error_message,
+        )
+    )
+    await db.commit()
+    raise HTTPException(status_code=status_code, detail=detail)
 
 
 _HISTORY_MESSAGES_LIMIT = 20  # ~10 предыдущих обменов (user+ai) для контекста
@@ -195,7 +305,7 @@ async def _get_recent_history(db: AsyncSession, session_id: int) -> list[ChatMes
     result = await db.execute(
         select(ChatMessage)
         .where(ChatMessage.session_id == session_id)
-        .order_by(ChatMessage.created_at.desc())
+        .order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc())
         .limit(_HISTORY_MESSAGES_LIMIT)
     )
     return list(reversed(result.scalars().all()))
@@ -240,7 +350,7 @@ async def _handle_db_query(
         f"Верни ТОЛЬКО SQL, без пояснений, без markdown.\n\n"
         f"Требования к результату (он показывается пользователю как таблица, "
         f"колонки называются ровно так, как ты их назовёшь в SELECT):\n"
-        f'- Давай каждой колонке человекочитаемый алиас на русском, например '
+        f"- Давай каждой колонке человекочитаемый алиас на русском, например "
         f'`name AS "Название"`, `price AS "Цена"`, `quantity AS "Количество"`.\n'
         f"- Не включай технические/служебные колонки в результат, если пользователь "
         f"явно не попросил их показать: id, любые *_id как внешние ключи, а также "
@@ -253,7 +363,9 @@ async def _handle_db_query(
         f"(или `to_char(col, 'DD.MM.YYYY')`), если пользователь не просил точное время.\n\n"
         f"Вопрос: {prompt}"
     )
-    result = await adapter.generate(prompt=sql_prompt, max_tokens=1500)
+    # tools=[] обязателен: без него adapter.generate() цепляет файловые tools,
+    # и модель могла ответить вызовом generate_spreadsheet вместо SQL.
+    result = await adapter.generate(prompt=sql_prompt, max_tokens=1500, tools=[])
     generated_sql = _extract_sql(result.text)
     generated_sql = _strip_hidden_columns(generated_sql, prompt)
 
@@ -263,7 +375,12 @@ async def _handle_db_query(
         )
 
     if not query_result["ok"]:
-        return (f"Не могу выполнить этот запрос: {query_result['error']}", None, result.tokens_in, result.tokens_out)
+        return (
+            f"Не могу выполнить этот запрос: {query_result['error']}",
+            None,
+            result.tokens_in,
+            result.tokens_out,
+        )
 
     text_out = f"Найдено строк: {query_result['row_count']}"
     safe_rows = _sanitize_rows(query_result["rows"])
@@ -388,7 +505,9 @@ def _column_source_key(expr: str) -> str:
     """Из выражения колонки SELECT ('p.created_at', 'created_at::date',
     'c.name AS "Категория"') достаёт исходное имя колонки без алиаса,
     таблицы-префикса и приведения типа — по нему и матчим на служебность."""
-    alias_match = re.search(r'\bAS\b\s+(?:"[^"]+"|\'[^\']+\'|[A-Za-z_][A-Za-z0-9_]*)', expr, re.IGNORECASE)
+    alias_match = re.search(
+        r'\bAS\b\s+(?:"[^"]+"|\'[^\']+\'|[A-Za-z_][A-Za-z0-9_]*)', expr, re.IGNORECASE
+    )
     source = expr[: alias_match.start()] if alias_match else expr
     source = re.sub(r"::\w+\s*$", "", source).strip()
     source = source.rsplit(".", 1)[-1] if "." in source else source
@@ -401,7 +520,9 @@ def _strip_hidden_columns(sql: str, user_prompt: str) -> str:
     просил. Работает поверх готового SQL, а не полагается на то, что модель
     сама учла инструкцию в промпте."""
     select_pos = _find_top_level_keyword(sql, "SELECT")
-    from_pos = _find_top_level_keyword(sql, "FROM", start=select_pos + 6) if select_pos != -1 else -1
+    from_pos = (
+        _find_top_level_keyword(sql, "FROM", start=select_pos + 6) if select_pos != -1 else -1
+    )
     if select_pos == -1 or from_pos == -1:
         return sql  # не похоже на обычный SELECT ... FROM — не трогаем
 

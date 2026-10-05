@@ -5,6 +5,7 @@
 (chat_multimodal, эвристика «скан vs текстовый PDF») используют эту
 функцию, чтобы не дублировать логику открытия/обхода документа.
 """
+
 from __future__ import annotations
 
 import io
@@ -30,3 +31,12 @@ def extract_pdf_pages(data: bytes) -> list[str]:
             if text:
                 pages.append(text)
     return pages
+
+
+def pdf_page_count(data: bytes) -> int:
+    """Реальное число страниц PDF (в отличие от extract_pdf_pages, где страницы
+    без текстового слоя в список не попадают). Текст не извлекается — дёшево."""
+    import pdfplumber
+
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        return len(pdf.pages)

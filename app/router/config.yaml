@@ -12,6 +12,29 @@ fallback_model: gemini-flash  # безопасный дефолт при низ�
 # на середине. Теперь лимит настраивается здесь, по типу задачи.
 default_max_tokens: 2048
 
+# Логическое имя (то, что видно в API: ChatRequest.model, routing_rules ниже) ->
+# провайдер и РЕАЛЬНЫЙ ID модели. Это единственное место, где живут ID моделей.
+# Проверить, что ID доступны вашим ключам: `uv run python scripts/list_models.py`
+# (скрипт сверяет этот блок со списком моделей провайдеров).
+models:
+  gpt-4o-mini: {provider: openai, id: gpt-4o-mini}
+  gpt-4o: {provider: openai, id: gpt-4o}
+  claude-haiku: {provider: anthropic, id: claude-haiku-4-5-20251001}
+  claude-sonnet: {provider: anthropic, id: claude-sonnet-5}
+  claude-opus: {provider: anthropic, id: claude-opus-5}
+  gemini-flash: {provider: gemini, id: gemini-3.6-flash}
+  gemini-pro: {provider: gemini, id: gemini-3.1-pro-preview}
+
+# Модель генерации изображений (OpenAI Images API) и её таймаут в секундах.
+image:
+  provider: openai
+  model: gpt-image-2
+  timeout_s: 45
+
+# Тип серверного web-search tool у Anthropic. В установленном SDK есть версии
+# web_search_20250305 (текущая), web_search_20260209 и web_search_20260318.
+anthropic_web_search_tool: web_search_20250305
+
 routing_rules:
   translation:
     primary: gpt-4o-mini

@@ -67,9 +67,13 @@ async def classify(prompt: str, adapter: ModelAdapter) -> Classification:
     except (json.JSONDecodeError, KeyError, ValueError):
         # Классификатор не вернул валидный JSON — безопасный дефолт,
         # не роняем запрос целиком.
-        return Classification(task_type="general_qa", confidence=0.0, reasoning="classifier_parse_error")
+        return Classification(
+            task_type="general_qa", confidence=0.0, reasoning="classifier_parse_error"
+        )
 
     if task_type not in KNOWN_TASK_TYPES:
-        return Classification(task_type="general_qa", confidence=0.0, reasoning=f"unknown_task_type:{task_type}")
+        return Classification(
+            task_type="general_qa", confidence=0.0, reasoning=f"unknown_task_type:{task_type}"
+        )
 
     return Classification(task_type=task_type, confidence=confidence, reasoning=reasoning)

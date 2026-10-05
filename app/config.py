@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import model_validator
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -26,6 +26,18 @@ class Settings(BaseSettings):
     # "https://erp.kerneu.local,https://erp.kerneu.kz"
     cors_allowed_origins: str = ""
 
+    # Cloudflare R2. Дефолтов нет намеренно: bucket/домен не должны
+    # молча подставляться из кода.
+    r2_account_id: str = ""
+    r2_access_key: str = ""
+    r2_secret_key: str = ""
+    r2_bucket_name: str = ""
+    # Публичный домен bucket. НЕОБЯЗАТЕЛЕН и для файлов ai-platform (префикс ai/)
+    # не используется: они отдаются только presigned-ссылками.
+    r2_public_domain: str = ""
+    # Срок жизни presigned-ссылки, секунды (R2 максимум — 7 суток).
+    r2_presign_expires: int = Field(default=3600, ge=60, le=604800)
+
     environment: str = "development"
     log_level: str = "INFO"
 
@@ -40,7 +52,9 @@ class Settings(BaseSettings):
         падаем при старте, а не отдаём сервис, который принимает
         самоподписанные токены."""
 
-        if self.environment != "development" and (not self.jwt_secret or self.jwt_secret == "change-me"):
+        if self.environment != "development" and (
+            not self.jwt_secret or self.jwt_secret == "change-me"
+        ):
             raise ValueError(
                 "JWT_SECRET не задан или оставлен пустым/дефолтным ('change-me') "
                 f"при ENVIRONMENT={self.environment!r}. Задайте реальный секрет в .env "

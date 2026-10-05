@@ -2,19 +2,18 @@
 
 Зеркалит app/utils/pptx_builder.py: модель отдаёт структурированные данные
 (листы -> заголовки колонок + строки), мы собираем реальный .xlsx через
-openpyxl и заливаем в R2, возвращая публичную ссылку.
+openpyxl и возвращаем байты (загрузка в R2 — в app/tools).
 """
+
 import io
 
 from openpyxl import Workbook
-
-from app.utils.r2 import upload_file_to_r2
 
 SPREADSHEET_TOOL = {
     "name": "generate_spreadsheet",
     "description": (
         "Generates an Excel spreadsheet (.xlsx) from tabular data and "
-        "returns a download link. Use this when the user asks for an "
+        "delivers it as a downloadable attachment. Use this when the user asks for an "
         "export, a data file, or a table they explicitly want to download "
         "— NOT for small tables that are more useful shown directly in "
         "the chat reply."
@@ -73,7 +72,8 @@ def _coerce_cell(value):
         return value
 
 
-def create_spreadsheet_file(filename: str, sheets: list) -> str:
+def build_spreadsheet(sheets: list) -> bytes:
+    """Собирает .xlsx и возвращает байты (загрузка в R2 — в app/tools)."""
     workbook = Workbook()
     workbook.remove(workbook.active)  # убираем дефолтный пустой лист
 
@@ -90,14 +90,4 @@ def create_spreadsheet_file(filename: str, sheets: list) -> str:
 
     stream = io.BytesIO()
     workbook.save(stream)
-    file_bytes = stream.getvalue()
-
-    safe_name = "".join(c if c.isalnum() else "_" for c in filename)[:20]
-    out_filename = f"{safe_name}.xlsx"
-
-    return upload_file_to_r2(
-        file_bytes=file_bytes,
-        original_filename=out_filename,
-        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        folder="spreadsheets",
-    )
+    return stream.getvalue()

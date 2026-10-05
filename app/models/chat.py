@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import ForeignKey, Integer, String, Text, func
+from sqlalchemy import ForeignKey, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -38,6 +38,14 @@ class ChatMessage(Base):
     # вернуть, потому что он нигде не хранился). NULL для всех сообщений,
     # кроме ответов на db_query с непустым результатом.
     table_data: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
+
+    # Вложения сообщения: файлы/изображения, созданные ассистентом (role=ai)
+    # или приложенные пользователем (role=user). Элемент:
+    # {"type": "file"|"image", "name": str, "key": str, "mime": str, "size": int}.
+    # Хранится ТОЛЬКО ключ объекта в R2 — presigned url вычисляется при чтении.
+    attachments: Mapped[list[dict]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
+    )
 
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 

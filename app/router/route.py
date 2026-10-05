@@ -1,9 +1,19 @@
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 import yaml
 
 _CONFIG_PATH = Path(__file__).parent / "config.yaml"
+
+
+@lru_cache
+def load_config(path: Path = _CONFIG_PATH) -> dict:
+    """YAML-конфиг роутера целиком (routing_rules, models, image, ...).
+    Кэшируется: используется и роутером, и реестром адаптеров, и генератором
+    изображений."""
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
 
 @dataclass
@@ -21,8 +31,7 @@ class Router:
     не трогая интерфейс decide()."""
 
     def __init__(self, config_path: Path = _CONFIG_PATH):
-        with open(config_path, encoding="utf-8") as f:
-            self._config = yaml.safe_load(f)
+        self._config = load_config(config_path)
 
     @property
     def default_max_tokens(self) -> int:
