@@ -46,6 +46,9 @@ class ChatResponse(BaseModel):
     needs_review: bool = False
     # Файлы/изображения, созданные ассистентом в этом ответе.
     attachments: list[AttachmentOut] = Field(default_factory=list)
+    # Реальный id модели картинок, если в ответе есть созданное изображение
+    # (model_used — всегда модель текста).
+    image_model_used: str | None = None
 
 
 class SessionRename(BaseModel):

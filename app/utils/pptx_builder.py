@@ -2,12 +2,15 @@ import io
 
 from pptx import Presentation
 
+from app.utils.tool_schema import SUMMARY_PROP
+
 PRESENTATION_TOOL = {
     "name": "generate_presentation",
     "description": "Generates a PowerPoint presentation (.pptx) file and delivers it to the user as a downloadable attachment when requested.",
     "parameters": {
         "type": "object",
         "properties": {
+            "summary": SUMMARY_PROP,
             "title": {"type": "string", "description": "The presentation main title"},
             "subtitle": {
                 "type": "string",
@@ -30,7 +33,7 @@ PRESENTATION_TOOL = {
                 },
             },
         },
-        "required": ["title", "slides"],
+        "required": ["title", "slides", "summary"],
     },
 }
 

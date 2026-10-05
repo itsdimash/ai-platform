@@ -8,7 +8,14 @@ import re
 from fastapi import HTTPException
 
 from app.utils.r2 import StorageNotConfiguredError, head_info_async, presign_get, put_bytes_async
-from app.utils.storage import build_key, display_name, is_inline_mime, make_record, owns_key
+from app.utils.storage import (
+    build_key,
+    display_name,
+    ensure_extension,
+    is_inline_mime,
+    make_record,
+    owns_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +39,33 @@ def with_urls(records: list[dict] | None) -> list[dict]:
             url = None
         result.append({**rec, "url": url})
     return result
+
+
+_KIND_BY_MIME = {
+    "application/pdf": "pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "docx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "xlsx",
+}
+
+
+def kinds_of_records(records: list[dict]) -> list[str]:
+    """Виды вложений для классификатора: image | pdf | docx | xlsx | file."""
+    return [
+        "image" if r.get("type") == "image" else _KIND_BY_MIME.get(r.get("mime", ""), "file")
+        for r in records
+    ]
+
+
+def describe_kinds(kinds: list[str]) -> str:
+    """["pdf", "image", "image"] -> "attached: 1 pdf, 2 images" ("" если вложений нет)."""
+    if not kinds:
+        return ""
+    parts = []
+    for kind in dict.fromkeys(kinds):
+        n = kinds.count(kind)
+        label = "images" if kind == "image" and n > 1 else kind
+        parts.append(f"{n} {label}")
+    return "attached: " + ", ".join(parts)
 
 
 def _name_from_key(key: str) -> str:
@@ -74,7 +108,7 @@ async def store_user_upload(
 ) -> dict:
     """Сохраняет файл пользователя в ai/{user_id}/{session_id}/uploads/...,
     возвращает запись вложения."""
-    name = display_name(filename, default="attachment")
+    name = ensure_extension(display_name(filename, default="attachment"), mime)
     key = build_key(user_id, session_id, name, uploads=True)
     await put_bytes_async(key, data, mime, name=name)
     return make_record(name=name, key=key, mime=mime, size=len(data))

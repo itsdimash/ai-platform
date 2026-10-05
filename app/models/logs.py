@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Float, Integer, String, func
+from sqlalchemy import Boolean, Float, Integer, String, Text, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -24,6 +24,21 @@ class AIRequestLog(Base):
     tokens_in: Mapped[int] = mapped_column(Integer, default=0)
     tokens_out: Mapped[int] = mapped_column(Integer, default=0)
     latency_ms: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Токены вызова классификатора (раньше нигде не учитывались).
+    classifier_tokens_in: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    classifier_tokens_out: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    # True, если файловый запрос потребовал второй попытки (принудительный tool / жёсткая
+    # инструкция после того, как первая попытка не вызвала инструмент).
+    forced_fallback: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=text("false"), nullable=False
+    )
+    # Реальный id модели, создавшей изображение (если создавалось).
+    image_model: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     status: Mapped[str] = mapped_column(String(20), default="success")  # success | error
     error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)

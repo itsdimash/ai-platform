@@ -11,6 +11,7 @@ ToolExecutionError — роутеры чата отвечают на него 5x
 """
 
 import asyncio
+import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -33,6 +34,8 @@ MIME_XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 MIME_PDF = "application/pdf"
 MIME_PNG = "image/png"
 
+_MAX_LINE = 300
+
 
 class ToolExecutionError(Exception):
     """Инструмент вызван моделью корректно, но выполнить его не удалось."""
@@ -53,6 +56,7 @@ class ToolContext:
 class ToolResult:
     attachment: dict  # запись вложения в формате БД (без url)
     summary: str  # детерминированное резюме для поля text ответа
+    image_model: str | None = None  # реальный id модели картинок (для image_model_used)
 
 
 def _plural(n: int, one: str, few: str, many: str) -> str:
@@ -62,6 +66,26 @@ def _plural(n: int, one: str, few: str, many: str) -> str:
     if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
         return f"{n} {few}"
     return f"{n} {many}"
+
+
+def clean_line(value: object, limit: int = _MAX_LINE) -> str:
+    """Одна короткая строка без переводов строк/лишних пробелов (summary и caption
+    приходят от модели и попадают прямо в текст ответа)."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    return text[:limit].rstrip()
+
+
+def file_reply(emoji: str, kind: str, title: str, details: str, summary: object = "") -> str:
+    """«📊 Готово! Презентация «X» — 12 слайдов. <summary>»"""
+    text = f"{emoji} Готово! {kind} «{title}» — {details}."
+    extra = clean_line(summary)
+    return f"{text} {extra}" if extra else text
+
+
+def image_reply(caption: object = "") -> str:
+    """«🎨 Готово: <caption>»"""
+    text = clean_line(caption)
+    return f"🎨 Готово: {text}" if text else "🎨 Готово: изображение создано."
 
 
 async def _store(ctx: ToolContext, filename: str, data: bytes, mime: str) -> dict:
@@ -77,44 +101,48 @@ async def _run_one(
     """Выполняет один tool-вызов; None, если имя инструмента не наше
     (например, серверные tools провайдера)."""
     if name == "generate_presentation":
-        title = args.get("title") or "Презентация"
+        title = clean_line(args.get("title")) or "Презентация"
         slides = args.get("slides") or []
         data = await asyncio.to_thread(build_presentation, title, args.get("subtitle", ""), slides)
         record = await _store(ctx, f"{title}.pptx", data, MIME_PPTX)
         count = _plural(len(slides) + 1, "слайд", "слайда", "слайдов")
-        return ToolResult(record, f"📊 Готово! Презентация «{title}» — {count}.")
+        return ToolResult(
+            record, file_reply("📊", "Презентация", title, count, args.get("summary"))
+        )
 
     if name == "generate_document":
-        title = args.get("title") or "Документ"
+        title = clean_line(args.get("title")) or "Документ"
         sections = args.get("sections") or []
         data = await asyncio.to_thread(build_document, title, sections)
         record = await _store(ctx, f"{title}.docx", data, MIME_DOCX)
         count = _plural(len(sections), "раздел", "раздела", "разделов")
-        return ToolResult(record, f"📄 Готово! Документ «{title}» — {count}.")
+        return ToolResult(record, file_reply("📄", "Документ", title, count, args.get("summary")))
 
     if name == "generate_spreadsheet":
-        filename = args.get("filename") or "Таблица"
+        filename = clean_line(args.get("filename")) or "Таблица"
         sheets = args.get("sheets") or []
         data = await asyncio.to_thread(build_spreadsheet, sheets)
         record = await _store(ctx, f"{filename}.xlsx", data, MIME_XLSX)
         rows = sum(len(s.get("rows") or []) for s in sheets)
         info = f"{_plural(len(sheets), 'лист', 'листа', 'листов')}, {_plural(rows, 'строка', 'строки', 'строк')}"
-        return ToolResult(record, f"📈 Готово! Таблица «{filename}» — {info}.")
+        return ToolResult(record, file_reply("📈", "Таблица", filename, info, args.get("summary")))
 
     if name == "generate_pdf":
-        title = args.get("title") or "Документ"
+        title = clean_line(args.get("title")) or "Документ"
         sections = args.get("sections") or []
         data = await asyncio.to_thread(build_pdf, title, sections)
         record = await _store(ctx, f"{title}.pdf", data, MIME_PDF)
         count = _plural(len(sections), "раздел", "раздела", "разделов")
-        return ToolResult(record, f"📕 Готово! PDF «{title}» — {count}.")
+        return ToolResult(record, file_reply("📕", "PDF", title, count, args.get("summary")))
 
     if name == "generate_image":
-        data = await generate_image_bytes(
-            prompt=args.get("prompt") or prompt, size=args.get("size", "1024x1024")
+        data, image_model = await generate_image_bytes(
+            prompt=args.get("prompt") or prompt, size=args.get("size")
         )
-        record = await _store(ctx, "image.png", data, MIME_PNG)
-        return ToolResult(record, "🎨 Готово! Изображение создано.")
+        caption = clean_line(args.get("caption"))
+        base = caption[:60].rstrip(" .,;:!?…") or "image"
+        record = await _store(ctx, f"{base}.png", data, MIME_PNG)
+        return ToolResult(record, image_reply(caption), image_model=image_model)
 
     return None
 
@@ -140,10 +168,12 @@ async def apply_tool_calls(
 ) -> "GenerationResult":
     """Исполняет tool_calls ответа модели. Если хотя бы один наш инструмент
     отработал — text становится детерминированным резюме (текст модели,
-    написанный до выполнения инструмента, звучит как обещание), а файлы
-    попадают в result.attachments. Если инструментов не было — result не меняется."""
+    написанный до выполнения инструмента, звучит как обещание), файлы попадают в
+    result.attachments, а реальный id модели картинок — в result.image_model.
+    Если инструментов не было — result не меняется."""
     tool_results = await run_tool_calls(result.tool_calls, ctx=ctx, prompt=prompt)
     if tool_results:
         result.text = "\n".join(r.summary for r in tool_results)
         result.attachments = [r.attachment for r in tool_results]
+        result.image_model = next((r.image_model for r in tool_results if r.image_model), None)
     return result

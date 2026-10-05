@@ -1,3 +1,8 @@
+"""OpenAI через Responses API — единый путь для всех моделей (в том числе gpt-4o*):
+function tools, принудительный tool_choice, reasoning и web_search работают в одном
+вызове (в chat.completions gpt-5.x не принимает function tools вместе с reasoning_effort
+и требует max_completion_tokens вместо max_tokens)."""
+
 import base64
 import json
 import time
@@ -5,7 +10,20 @@ from typing import Any, cast
 
 from openai import AsyncOpenAI
 
-from .base import ALL_TOOLS, Attachment, GenerationResult, ModelAdapter
+from .base import (
+    ALL_TOOLS,
+    FINISH_MAX_TOKENS,
+    FINISH_REFUSAL,
+    FINISH_STOP,
+    Attachment,
+    ChatTurn,
+    GenerationResult,
+    ModelAdapter,
+    ModelCaps,
+    turns_from,
+)
+
+_EFFORT_ORDER = ("none", "low", "medium", "high")
 
 
 def _image_data_url(att: Attachment) -> str:
@@ -13,133 +31,56 @@ def _image_data_url(att: Attachment) -> str:
     return f"data:{att.mime_type};base64,{b64}"
 
 
+def resolve_reasoning_effort(abstract: str, supported: tuple[str, ...]) -> str | None:
+    """Абстрактный уровень -> допустимый reasoning.effort модели (None — без reasoning)."""
+    if not supported:
+        return None
+    wanted = {"off": "none", "low": "low", "medium": "medium", "high": "high", "max": "high"}[
+        abstract
+    ]
+    if wanted in supported:
+        return wanted
+    target = _EFFORT_ORDER.index(wanted)
+    return min(supported, key=lambda e: abs(_EFFORT_ORDER.index(e) - target))
+
+
 class OpenAIAdapter(ModelAdapter):
-    def __init__(self, api_key: str, model: str):
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        caps: ModelCaps | None = None,
+        timeout_s: float = 600.0,
+        max_retries: int = 2,
+    ):
         self.api_key = api_key
         self.name = model
-        self.client = AsyncOpenAI(api_key=api_key)
         self.model = model
+        self.caps = caps or ModelCaps(thinking_mode="none", forced_tool="with_thinking")
+        # Ретраи с backoff на 429/5xx/таймауты — встроенный механизм SDK.
+        self.client = AsyncOpenAI(api_key=api_key, timeout=timeout_s, max_retries=max_retries)
 
     async def generate(
         self,
-        prompt: str,
+        prompt: str | None = None,
         *,
+        messages: list[ChatTurn] | None = None,
         system: str | None = None,
         json_mode: bool = False,
         web_search: bool = False,
-        max_tokens: int = 2048,
+        max_tokens: int = 8192,
         attachments: list[Attachment] | None = None,
         tools: list[dict[str, Any]] | None = None,
+        force_tool: str | None = None,
+        thinking: str = "off",
+        timeout_s: float | None = None,
     ) -> GenerationResult:
-        active_tools = tools if tools is not None else ALL_TOOLS
+        started = time.monotonic()
+
+        response_tools: list[dict[str, Any]] = []
         if web_search:
-            return await self._generate_with_web_search(
-                prompt,
-                system=system,
-                max_tokens=max_tokens,
-                attachments=attachments,
-                tools=active_tools,
-            )
-        return await self._generate_chat_completion(
-            prompt,
-            system=system,
-            json_mode=json_mode,
-            max_tokens=max_tokens,
-            attachments=attachments,
-            tools=active_tools,
-        )
-
-    async def _generate_chat_completion(
-        self,
-        prompt: str,
-        *,
-        system: str | None,
-        json_mode: bool,
-        max_tokens: int,
-        attachments: list[Attachment] | None = None,
-        tools: list[dict[str, Any]] | None = None,
-    ) -> GenerationResult:
-        started = time.monotonic()
-
-        messages = []
-        if system:
-            messages.append({"role": "system", "content": system})
-
-        image_atts = [a for a in (attachments or []) if a.kind == "image"]
-
-        if image_atts:
-            content: list[dict] = [{"type": "text", "text": prompt}]
-            for att in image_atts:
-                content.append({"type": "image_url", "image_url": {"url": _image_data_url(att)}})
-            messages.append({"role": "user", "content": content})
-        else:
-            messages.append({"role": "user", "content": prompt})
-
-        formatted_tools = [{"type": "function", "function": t} for t in (tools or [])]
-
-        kwargs: dict = {
-            "model": self.model,
-            "messages": messages,
-            "max_tokens": max_tokens,
-        }
-        if formatted_tools:
-            kwargs["tools"] = formatted_tools
-        if json_mode:
-            kwargs["response_format"] = {"type": "json_object"}
-
-        response = await self.client.chat.completions.create(**kwargs)
-        latency_ms = int((time.monotonic() - started) * 1000)
-
-        choice = response.choices[0].message
-        output_text = choice.content or ""
-
-        tool_calls = [
-            {"name": tc.function.name, "args": json.loads(tc.function.arguments or "{}")}
-            for tc in (choice.tool_calls or [])
-            if tc.type == "function"
-        ]
-
-        return GenerationResult(
-            text=output_text,
-            tokens_in=response.usage.prompt_tokens if response.usage else 0,
-            tokens_out=response.usage.completion_tokens if response.usage else 0,
-            latency_ms=latency_ms,
-            raw={"id": response.id, "model": response.model},
-            tool_calls=tool_calls,
-        )
-
-    async def _generate_with_web_search(
-        self,
-        prompt: str,
-        *,
-        system: str | None,
-        max_tokens: int,
-        attachments: list[Attachment] | None = None,
-        tools: list[dict[str, Any]] | None = None,
-    ) -> GenerationResult:
-        """Web search идёт через Responses API. Раньше эта ветка молча теряла
-        function tools и вложения — теперь файловые инструменты и изображения
-        работают и здесь (формат function tool в Responses API плоский, без
-        обёртки {"function": ...})."""
-        started = time.monotonic()
-
-        input_items: list[dict[str, Any]] = []
-        if system:
-            input_items.append({"role": "developer", "content": system})
-
-        image_atts = [a for a in (attachments or []) if a.kind == "image"]
-        if image_atts:
-            user_content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
-            for att in image_atts:
-                user_content.append(
-                    {"type": "input_image", "image_url": _image_data_url(att), "detail": "auto"}
-                )
-            input_items.append({"role": "user", "content": user_content})
-        else:
-            input_items.append({"role": "user", "content": prompt})
-
-        response_tools: list[dict[str, Any]] = [{"type": "web_search"}]
-        for t in tools or []:
+            response_tools.append({"type": "web_search"})
+        for t in tools if tools is not None else ALL_TOOLS:
             response_tools.append(
                 {
                     "type": "function",
@@ -151,15 +92,27 @@ class OpenAIAdapter(ModelAdapter):
                 }
             )
 
-        response = await self.client.responses.create(
-            model=self.model,
-            input=cast(Any, input_items),
-            tools=cast(Any, response_tools),
-            max_output_tokens=max_tokens,
-        )
-        latency_ms = int((time.monotonic() - started) * 1000)
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "input": cast(Any, self._build_input(turns_from(prompt, messages), attachments)),
+            "max_output_tokens": max_tokens,
+        }
+        if system:
+            kwargs["instructions"] = system
+        if response_tools:
+            kwargs["tools"] = cast(Any, response_tools)
+        if force_tool:
+            kwargs["tool_choice"] = {"type": "function", "name": force_tool}
+        effort = resolve_reasoning_effort(thinking, self.caps.efforts)
+        if effort:
+            kwargs["reasoning"] = {"effort": effort}
+        if json_mode:
+            kwargs["text"] = {"format": {"type": "json_object"}}
+        if timeout_s:
+            kwargs["timeout"] = timeout_s
 
-        output_text = response.output_text or ""
+        response = await self.client.responses.create(**kwargs)
+        latency_ms = int((time.monotonic() - started) * 1000)
 
         tool_calls = [
             {"name": item.name, "args": json.loads(item.arguments or "{}")}
@@ -167,12 +120,45 @@ class OpenAIAdapter(ModelAdapter):
             if item.type == "function_call"
         ]
 
+        finish, detail = FINISH_STOP, None
+        refused = any(
+            part.type == "refusal"
+            for item in response.output
+            if item.type == "message"
+            for part in item.content
+        )
+        incomplete = getattr(getattr(response, "incomplete_details", None), "reason", None)
+        if refused or incomplete == "content_filter":
+            finish, detail = FINISH_REFUSAL, "refusal" if refused else incomplete
+        elif incomplete == "max_output_tokens":
+            finish = FINISH_MAX_TOKENS
+
         usage = response.usage
         return GenerationResult(
-            text=output_text,
+            text=response.output_text or "",
             tokens_in=usage.input_tokens if usage else 0,
             tokens_out=usage.output_tokens if usage else 0,
             latency_ms=latency_ms,
-            raw={"id": response.id, "model": response.model},
+            raw={"id": response.id, "model": response.model, "status": response.status},
             tool_calls=tool_calls,
+            model_used=response.model,
+            finish=finish,
+            finish_detail=detail,
         )
+
+    @staticmethod
+    def _build_input(turns: list[ChatTurn], attachments: list[Attachment] | None) -> list[dict]:
+        image_atts = [a for a in (attachments or []) if a.kind == "image"]
+        items: list[dict] = []
+        last_user = max((i for i, t in enumerate(turns) if t.role == "user"), default=-1)
+        for i, turn in enumerate(turns):
+            if i == last_user and image_atts:
+                content: list[dict[str, Any]] = [{"type": "input_text", "text": turn.content}]
+                for att in image_atts:
+                    content.append(
+                        {"type": "input_image", "image_url": _image_data_url(att), "detail": "auto"}
+                    )
+                items.append({"role": "user", "content": content})
+            else:
+                items.append({"role": turn.role, "content": turn.content})
+        return items

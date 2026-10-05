@@ -5,23 +5,22 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import limits
-from app.adapters.anthropic_adapter import AnthropicAdapter
 from app.adapters.base import GenerationResult
-from app.adapters.gemini_adapter import GeminiAdapter
-from app.adapters.openai_adapter import OpenAIAdapter
+from app.adapters.registry import build_adapters
 from app.auth import CurrentUser, get_current_user
 from app.classifier.classify import Classification
+from app.config import get_settings
 from app.db.session import get_db
 from app.main import app
 from app.models.chat import ChatMessage, ChatSession
 from app.models.logs import AIRequestLog
 from app.routers import chat_multimodal, document_extract
 from app.routers.deps import get_adapters
+from app.services import chat_service
 from app.utils import attachments as attachments_mod
 from app.utils import uploads
 from app.utils.docx_builder import build_document
 from app.utils.pdf_builder import build_pdf
-from app.utils.storage import make_record
 from tests.test_media import noisy_png
 
 DOCX = build_document("Договор поставки", [{"paragraphs": ["Предмет договора: болты"]}])
@@ -65,12 +64,7 @@ class FakeDB:
 @pytest.fixture
 def env(monkeypatch):
     db = FakeDB()
-    adapters = {
-        "claude-sonnet": AnthropicAdapter(api_key="x", model="claude-sonnet-5"),
-        "claude-haiku": AnthropicAdapter(api_key="x", model="claude-haiku-4-5-20251001"),
-        "gemini-flash": GeminiAdapter(api_key="x", model="gemini-3.6-flash"),
-        "gpt-4o": OpenAIAdapter(api_key="x", model="gpt-4o"),
-    }
+    adapters = build_adapters(get_settings())  # настоящие адаптеры (без сети), generate подменяется
     captured: dict = {}
     stored: list[dict] = []
 
@@ -81,22 +75,17 @@ def env(monkeypatch):
     for adapter in adapters.values():
         monkeypatch.setattr(adapter, "generate", fake_generate)
 
-    async def fake_store(user_id, session_id, filename, data, mime):
-        record = make_record(
-            name=filename,
-            key=f"ai/{user_id}/{session_id}/uploads/k_{filename}",
-            mime=mime,
-            size=len(data),
-        )
-        stored.append({**record, "data": data})
-        return record
+    async def fake_put(key, data, content_type, *, name=None):
+        # настоящий store_user_upload (имя, ключ, расширение) — подменён только R2
+        stored.append({"name": name, "key": key, "mime": content_type, "data": data})
 
-    async def fake_classify(prompt, adapter):
+    async def fake_classify(prompt, adapter, **kwargs):
+        captured["classifier_kwargs"] = kwargs
+        captured["classifier_prompt"] = prompt
         return Classification(task_type="general_qa", confidence=0.9, reasoning="")
 
-    monkeypatch.setattr(chat_multimodal, "store_user_upload", fake_store)
-    monkeypatch.setattr(document_extract, "store_user_upload", fake_store)
-    monkeypatch.setattr(chat_multimodal, "classify", fake_classify)
+    monkeypatch.setattr(attachments_mod, "put_bytes_async", fake_put)
+    monkeypatch.setattr(chat_service, "classify", fake_classify)
     monkeypatch.setattr(
         document_extract, "with_urls", lambda recs: [{**r, "url": "https://signed/x"} for r in recs]
     )
@@ -106,6 +95,11 @@ def env(monkeypatch):
     app.dependency_overrides[get_current_user] = lambda: CurrentUser(user_id=7, role="pm")
     yield SimpleNamespace(client=TestClient(app), db=db, captured=captured, stored=stored)
     app.dependency_overrides.clear()
+
+
+def prompt_of(env):
+    """Текст последней реплики пользователя, ушедшей в модель."""
+    return env.captured["messages"][-1].content
 
 
 def mm(env, files, **data):
@@ -125,8 +119,8 @@ def test_claude_gets_image_and_native_pdf_docx_goes_to_prompt_originals_stored(e
     assert r.status_code == 200, r.text
     kinds = sorted(a.kind for a in env.captured["attachments"])
     assert kinds == ["image", "pdf_document"]
-    assert "Содержимое DOCX «d.docx»" in env.captured["prompt"]
-    assert "Предмет договора: болты" in env.captured["prompt"]
+    assert "Содержимое DOCX «d.docx»" in prompt_of(env)
+    assert "Предмет договора: болты" in prompt_of(env)
     assert sorted(s["name"] for s in env.stored) == ["d.docx", "p.png", "s.pdf"]
     user_msg = next(m for m in env.db.of(ChatMessage) if m.role == "user")
     assert len(user_msg.attachments) == 3
@@ -145,8 +139,8 @@ def test_openai_gets_pdf_as_text_not_native(env):
     r = mm(env, [f("s.pdf", PDF)], model="gpt-4o")
     assert r.status_code == 200, r.text
     assert not env.captured.get("attachments")
-    assert "Содержимое PDF «s.pdf»" in env.captured["prompt"]
-    assert "Итого к оплате 100" in env.captured["prompt"]
+    assert "Содержимое PDF «s.pdf»" in prompt_of(env)
+    assert "Итого к оплате 100" in prompt_of(env)
 
 
 def test_haiku_pdf_over_100_pages_goes_to_text(env, monkeypatch):
@@ -154,7 +148,7 @@ def test_haiku_pdf_over_100_pages_goes_to_text(env, monkeypatch):
     r = mm(env, [f("s.pdf", PDF)], model="claude-haiku")
     assert r.status_code == 200, r.text
     assert not env.captured.get("attachments")
-    assert "слишком велик для нативной передачи" in env.captured["prompt"]
+    assert "слишком велик для нативной передачи" in prompt_of(env)
     # Sonnet с тем же PDF — нативно (лимит 600 страниц)
     r = mm(env, [f("s.pdf", PDF)], model="claude-sonnet")
     assert [a.kind for a in env.captured["attachments"]] == ["pdf_document"]
@@ -178,7 +172,7 @@ def test_docx_only_request_uses_classifier_path(env):
     r = mm(env, [f("d.docx", DOCX)])
     assert r.status_code == 200, r.text
     assert r.json()["task_type"] == "general_qa"
-    assert "Содержимое DOCX" in env.captured["prompt"]
+    assert "Содержимое DOCX" in prompt_of(env)
 
 
 def test_unsupported_and_mismatched_files_are_400_and_create_nothing(env):
@@ -297,7 +291,7 @@ def user_attachments(env):
 def test_keys_only_bind_no_text_goes_to_prompt(env, heads):
     r = mm(env, [], model="claude-sonnet", attachment_keys=[KEY_A])
     assert r.status_code == 200, r.text
-    assert "договор" not in env.captured["prompt"]  # содержимое/имя ключа в промпт не попадает
+    assert "договор" not in prompt_of(env)  # содержимое/имя ключа в промпт не попадает
     assert not env.captured.get("attachments")  # модели вложения по ключам не передаются
     assert [a["key"] for a in user_attachments(env)] == [KEY_A]
     assert heads == [KEY_A]  # только HEAD, один раз
@@ -332,14 +326,14 @@ def test_foreign_or_missing_key_fails_before_any_model_call(env, heads, monkeypa
         model="claude-sonnet",
         attachment_keys=["ai/8/_pending/uploads/" + "c" * 32 + "_x.pdf"],
     )
-    assert r.status_code == 403 and "prompt" not in env.captured
+    assert r.status_code == 403 and "messages" not in env.captured
 
     async def missing(key):
         return None
 
     monkeypatch.setattr(attachments_mod, "head_info_async", missing)
     r = mm(env, [], model="claude-sonnet", attachment_keys=[KEY_A])
-    assert r.status_code == 404 and "prompt" not in env.captured
+    assert r.status_code == 404 and "messages" not in env.captured
 
 
 def test_json_chat_keys_dedupe_and_limit(env, heads, monkeypatch):
@@ -347,12 +341,6 @@ def test_json_chat_keys_dedupe_and_limit(env, heads, monkeypatch):
         env.captured.update(kwargs)
         return GenerationResult(text="ок", tokens_in=1, tokens_out=1, latency_ms=1)
 
-    from app.routers import chat as chat_router
-
-    async def fake_classify(prompt, adapter):
-        return Classification(task_type="general_qa", confidence=0.9, reasoning="")
-
-    monkeypatch.setattr(chat_router, "classify", fake_classify)
     for adapter in app.dependency_overrides[get_adapters]().values():
         monkeypatch.setattr(adapter, "generate", fake_generate)
 
@@ -380,8 +368,10 @@ def test_attachment_name_is_sanitized_original_name_in_both_endpoints(env):
     assert user_attachments(env)[0]["name"] == "Скан 1.png"  # путь отброшен, пробелы сохранены
 
 
-def test_attachment_without_filename_extension_keeps_bare_name(env):
+def test_attachment_without_extension_gets_it_from_detected_mime(env):
     r = mm(env, [f("clipboard", PNG)], model="claude-sonnet")
     assert r.status_code == 200, r.text
     att = user_attachments(env)[0]
-    assert att["name"] == "clipboard" and att["mime"] == "image/png"
+    assert att["name"] == "clipboard.png" and att["mime"] == "image/png"
+    assert att["key"].endswith("_clipboard.png")  # и в ключе объекта
+    assert env.stored[0]["name"] == "clipboard.png"

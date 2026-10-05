@@ -9,6 +9,8 @@ import io
 
 from docx import Document
 
+from app.utils.tool_schema import SUMMARY_PROP
+
 DOCUMENT_TOOL = {
     "name": "generate_document",
     "description": (
@@ -22,6 +24,7 @@ DOCUMENT_TOOL = {
     "parameters": {
         "type": "object",
         "properties": {
+            "summary": SUMMARY_PROP,
             "title": {
                 "type": "string",
                 "description": "Document title, rendered as the main heading.",
@@ -46,7 +49,7 @@ DOCUMENT_TOOL = {
                 },
             },
         },
-        "required": ["title", "sections"],
+        "required": ["title", "sections", "summary"],
     },
 }
 

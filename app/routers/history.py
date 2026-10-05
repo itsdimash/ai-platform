@@ -55,6 +55,7 @@ async def get_session_messages(
             "created_at": m.created_at.isoformat(),
             "table": m.table_data,
             "attachments": with_urls(m.attachments),
+            "image_model_used": m.image_model,
         }
         for m in messages
     ]

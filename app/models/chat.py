@@ -47,6 +47,9 @@ class ChatMessage(Base):
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb")
     )
 
+    # Реальный id модели, создавшей изображение в этом ответе (рядом с model_used — моделью текста).
+    image_model: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
 
     session: Mapped[ChatSession] = relationship(back_populates="messages")
