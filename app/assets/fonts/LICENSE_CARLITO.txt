@@ -1,0 +1,4 @@
+Carlito (metric-compatible with Calibri) — Copyright (c) 2013 Lukasz Dziedzic (tyPoland),
+with Reserved Font Name "Carlito". Licensed under the SIL Open Font License, Version 1.1:
+https://openfontlicense.org (https://scripts.sil.org/OFL). Based on Lato by Lukasz Dziedzic.
+Bundled only for text-width measurement (layout planning); the generated files reference "Calibri".
