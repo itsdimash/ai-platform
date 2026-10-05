@@ -27,6 +27,7 @@ POST /v1/documents/extract + вклейка текста фронтом. Ком�
 «docx-текст (уже в prompt) + фото (attachment)» в одном запросе
 поддерживается: текст приходит строкой в prompt, изображения — файлами.
 """
+
 from __future__ import annotations
 
 import time

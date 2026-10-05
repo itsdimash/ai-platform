@@ -55,7 +55,9 @@ async def chat(
     try:
         classification = await classify(contextual_prompt, adapters["gemini-flash"])
     except Exception:  # noqa: BLE001 — намеренно широкий catch, см. комментарий выше
-        classification = Classification(task_type="general_qa", confidence=0.0, reasoning="classifier_call_failed")
+        classification = Classification(
+            task_type="general_qa", confidence=0.0, reasoning="classifier_call_failed"
+        )
 
     # 2. Роутинг — выбор целевой модели по конфигу, если пользователь сам не
     # указал модель явно (body.model). Ручной выбор полностью обходит
@@ -83,7 +85,9 @@ async def chat(
     # адаптерах) — явная ошибка вместо сырого KeyError глубже в коде.
     if decision.model not in adapters:
         status = "error"
-        error_message = f"Модель '{decision.model}' из конфига роутера не зарегистрирована в adapters."
+        error_message = (
+            f"Модель '{decision.model}' из конфига роутера не зарегистрирована в adapters."
+        )
         latency_ms = int((time.monotonic() - started) * 1000)
         db.add(ChatMessage(session_id=session.id, role="user", content=body.prompt))
         db.add(
@@ -102,7 +106,9 @@ async def chat(
             )
         )
         await db.commit()
-        raise HTTPException(status_code=500, detail="Ошибка конфигурации модели. Мы уже знаем об этом.")
+        raise HTTPException(
+            status_code=500, detail="Ошибка конфигурации модели. Мы уже знаем об этом."
+        )
 
     # 3. Выполнение задачи
     table_result: list[dict] | None = None
@@ -240,7 +246,7 @@ async def _handle_db_query(
         f"Верни ТОЛЬКО SQL, без пояснений, без markdown.\n\n"
         f"Требования к результату (он показывается пользователю как таблица, "
         f"колонки называются ровно так, как ты их назовёшь в SELECT):\n"
-        f'- Давай каждой колонке человекочитаемый алиас на русском, например '
+        f"- Давай каждой колонке человекочитаемый алиас на русском, например "
         f'`name AS "Название"`, `price AS "Цена"`, `quantity AS "Количество"`.\n'
         f"- Не включай технические/служебные колонки в результат, если пользователь "
         f"явно не попросил их показать: id, любые *_id как внешние ключи, а также "
@@ -263,7 +269,12 @@ async def _handle_db_query(
         )
 
     if not query_result["ok"]:
-        return (f"Не могу выполнить этот запрос: {query_result['error']}", None, result.tokens_in, result.tokens_out)
+        return (
+            f"Не могу выполнить этот запрос: {query_result['error']}",
+            None,
+            result.tokens_in,
+            result.tokens_out,
+        )
 
     text_out = f"Найдено строк: {query_result['row_count']}"
     safe_rows = _sanitize_rows(query_result["rows"])
@@ -388,7 +399,9 @@ def _column_source_key(expr: str) -> str:
     """Из выражения колонки SELECT ('p.created_at', 'created_at::date',
     'c.name AS "Категория"') достаёт исходное имя колонки без алиаса,
     таблицы-префикса и приведения типа — по нему и матчим на служебность."""
-    alias_match = re.search(r'\bAS\b\s+(?:"[^"]+"|\'[^\']+\'|[A-Za-z_][A-Za-z0-9_]*)', expr, re.IGNORECASE)
+    alias_match = re.search(
+        r'\bAS\b\s+(?:"[^"]+"|\'[^\']+\'|[A-Za-z_][A-Za-z0-9_]*)', expr, re.IGNORECASE
+    )
     source = expr[: alias_match.start()] if alias_match else expr
     source = re.sub(r"::\w+\s*$", "", source).strip()
     source = source.rsplit(".", 1)[-1] if "." in source else source
@@ -401,7 +414,9 @@ def _strip_hidden_columns(sql: str, user_prompt: str) -> str:
     просил. Работает поверх готового SQL, а не полагается на то, что модель
     сама учла инструкцию в промпте."""
     select_pos = _find_top_level_keyword(sql, "SELECT")
-    from_pos = _find_top_level_keyword(sql, "FROM", start=select_pos + 6) if select_pos != -1 else -1
+    from_pos = (
+        _find_top_level_keyword(sql, "FROM", start=select_pos + 6) if select_pos != -1 else -1
+    )
     if select_pos == -1 or from_pos == -1:
         return sql  # не похоже на обычный SELECT ... FROM — не трогаем
 

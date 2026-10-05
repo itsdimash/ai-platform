@@ -8,6 +8,7 @@ from app.utils.docx_builder import create_document_file
 from app.utils.image_builder import generate_and_save_image
 from app.utils.pptx_builder import create_presentation_file
 from app.utils.xlsx_builder import create_spreadsheet_file
+
 from .base import ALL_TOOLS, Attachment, GenerationResult, ModelAdapter
 
 _PRO_VALID_LEVELS = {"low", "high"}
@@ -118,7 +119,7 @@ class GeminiAdapter(ModelAdapter):
                             f"[📥 Скачать документ (.docx)]({file_url})"
                         )
                     except Exception as e:
-                        output_text = f"⚠️ Не удалось сформировать документ. Ошибка: {str(e)}"
+                        output_text = f"⚠️ Не удалось сформировать документ. Ошибка: {e!s}"
                 elif call.name == "generate_spreadsheet":
                     try:
                         file_url = create_spreadsheet_file(
@@ -130,7 +131,7 @@ class GeminiAdapter(ModelAdapter):
                             f"[📥 Скачать таблицу (.xlsx)]({file_url})"
                         )
                     except Exception as e:
-                        output_text = f"⚠️ Не удалось сформировать таблицу. Ошибка: {str(e)}"
+                        output_text = f"⚠️ Не удалось сформировать таблицу. Ошибка: {e!s}"
                 elif call.name == "generate_image":
                     try:
                         img_url = await generate_and_save_image(
@@ -139,7 +140,7 @@ class GeminiAdapter(ModelAdapter):
                         )
                         output_text = f"🎨 Вот изображение по вашему запросу:\n\n![Сгенерированное изображение]({img_url})"
                     except Exception as e:
-                        output_text = f"⚠️ Не удалось сгенерировать изображение. Ошибка: {str(e)}"
+                        output_text = f"⚠️ Не удалось сгенерировать изображение. Ошибка: {e!s}"
 
         usage = response.usage_metadata
         tokens_in = usage.prompt_token_count or 0 if usage else 0

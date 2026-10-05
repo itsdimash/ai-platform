@@ -2,7 +2,9 @@ import asyncio
 import base64
 import os
 from pathlib import Path
+
 from openai import AsyncOpenAI
+
 from app.utils.r2 import upload_file_to_r2
 
 IMAGE_TOOL = {
@@ -37,6 +39,7 @@ def _get_openai_api_key() -> str:
 
     try:
         from dotenv import load_dotenv
+
         load_dotenv()
         api_key = os.getenv("OPENAI_API_KEY")
         if api_key:
@@ -59,6 +62,7 @@ def _get_openai_api_key() -> str:
 
     try:
         import app.config as cfg
+
         for attr in ("OPENAI_API_KEY", "openai_api_key"):
             if hasattr(cfg, attr):
                 return getattr(cfg, attr)
@@ -124,4 +128,4 @@ async def generate_and_save_image(prompt: str, size: str = "1024x1024") -> str:
         )
     except Exception as err:
         print(f"[IMAGE GENERATION ERROR] {err}")
-        raise RuntimeError(f"Ошибка при генерации изображения: {str(err)}") from err
+        raise RuntimeError(f"Ошибка при генерации изображения: {err!s}") from err

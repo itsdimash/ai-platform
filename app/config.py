@@ -40,7 +40,9 @@ class Settings(BaseSettings):
         падаем при старте, а не отдаём сервис, который принимает
         самоподписанные токены."""
 
-        if self.environment != "development" and (not self.jwt_secret or self.jwt_secret == "change-me"):
+        if self.environment != "development" and (
+            not self.jwt_secret or self.jwt_secret == "change-me"
+        ):
             raise ValueError(
                 "JWT_SECRET не задан или оставлен пустым/дефолтным ('change-me') "
                 f"при ENVIRONMENT={self.environment!r}. Задайте реальный секрет в .env "

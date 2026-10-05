@@ -1,5 +1,6 @@
 import os
 import uuid
+
 import boto3
 from botocore.config import Config
 
@@ -18,10 +19,14 @@ def get_s3_client():
     )
 
 
-def upload_file_to_r2(file_bytes: bytes, original_filename: str, content_type: str, folder: str = "files") -> str:
+def upload_file_to_r2(
+    file_bytes: bytes, original_filename: str, content_type: str, folder: str = "files"
+) -> str:
     client = get_s3_client()
     bucket_name = os.getenv("R2_BUCKET_NAME", "ai-platform")
-    public_domain = os.getenv("R2_PUBLIC_DOMAIN", "https://pub-cc9e792b4c9d455688e606c55f752b07.r2.dev").rstrip("/")
+    public_domain = os.getenv(
+        "R2_PUBLIC_DOMAIN", "https://pub-cc9e792b4c9d455688e606c55f752b07.r2.dev"
+    ).rstrip("/")
 
     safe_filename = original_filename.replace(" ", "_")
     unique_filename = f"{folder}/{uuid.uuid4().hex[:8]}_{safe_filename}"

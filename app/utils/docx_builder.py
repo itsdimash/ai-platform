@@ -4,6 +4,7 @@
 (заголовок + секции), мы собираем реальный .docx через python-docx и
 заливаем в R2, возвращая публичную ссылку.
 """
+
 import io
 
 from docx import Document

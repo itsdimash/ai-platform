@@ -37,7 +37,9 @@ async def get_session_messages(
         raise HTTPException(status_code=404, detail="Сессия не найдена")
 
     result = await db.execute(
-        select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.created_at)
+        select(ChatMessage)
+        .where(ChatMessage.session_id == session_id)
+        .order_by(ChatMessage.created_at)
     )
     messages = result.scalars().all()
     return [

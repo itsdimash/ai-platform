@@ -5,6 +5,7 @@
 (chat_multimodal, эвристика «скан vs текстовый PDF») используют эту
 функцию, чтобы не дублировать логику открытия/обхода документа.
 """
+
 from __future__ import annotations
 
 import io

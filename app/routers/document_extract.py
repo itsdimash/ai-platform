@@ -76,7 +76,9 @@ async def extract_document_text(
 
     content = await file.read()
     if len(content) > MAX_FILE_SIZE_BYTES:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Файл слишком большой (лимит 15 МБ)")
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, detail="Файл слишком большой (лимит 15 МБ)"
+        )
 
     content_type = file.content_type or "application/octet-stream"
     file_url = upload_file_to_r2(

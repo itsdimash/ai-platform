@@ -9,6 +9,7 @@ from app.utils.docx_builder import create_document_file
 from app.utils.image_builder import generate_and_save_image
 from app.utils.pptx_builder import create_presentation_file
 from app.utils.xlsx_builder import create_spreadsheet_file
+
 from .base import ALL_TOOLS, Attachment, GenerationResult, ModelAdapter
 
 
@@ -31,7 +32,9 @@ class OpenAIAdapter(ModelAdapter):
         tools: list[dict[str, Any]] | None = None,
     ) -> GenerationResult:
         if web_search:
-            return await self._generate_with_web_search(prompt, system=system, max_tokens=max_tokens)
+            return await self._generate_with_web_search(
+                prompt, system=system, max_tokens=max_tokens
+            )
         return await self._generate_chat_completion(
             prompt,
             system=system,

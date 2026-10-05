@@ -1,5 +1,7 @@
 import io
+
 from pptx import Presentation
+
 from app.utils.r2 import upload_file_to_r2
 
 PRESENTATION_TOOL = {
@@ -9,7 +11,10 @@ PRESENTATION_TOOL = {
         "type": "object",
         "properties": {
             "title": {"type": "string", "description": "The presentation main title"},
-            "subtitle": {"type": "string", "description": "Presentation subtitle or author context"},
+            "subtitle": {
+                "type": "string",
+                "description": "Presentation subtitle or author context",
+            },
             "slides": {
                 "type": "array",
                 "description": "List of slide topics and content",

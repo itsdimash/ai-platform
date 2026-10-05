@@ -8,11 +8,14 @@ from app.utils.docx_builder import create_document_file
 from app.utils.image_builder import generate_and_save_image
 from app.utils.pptx_builder import create_presentation_file
 from app.utils.xlsx_builder import create_spreadsheet_file
+
 from .base import ALL_TOOLS, Attachment, GenerationResult, ModelAdapter
 
 
 class AnthropicAdapter(ModelAdapter):
-    def __init__(self, api_key: str, openai_api_key: str | None = None, model: str = "claude-sonnet-5"):
+    def __init__(
+        self, api_key: str, openai_api_key: str | None = None, model: str = "claude-sonnet-5"
+    ):
         self.name = model
         self.client = AsyncAnthropic(api_key=api_key)
         self.openai_api_key = openai_api_key or api_key
