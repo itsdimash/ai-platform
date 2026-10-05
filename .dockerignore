@@ -1,0 +1,11 @@
+# Секреты и локальное окружение не должны попадать в образ
+# (переменные приходят через env_file в docker-compose).
+.env
+.venv
+.git
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+tests/
