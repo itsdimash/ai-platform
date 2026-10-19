@@ -123,6 +123,9 @@ async def fail_request(
     classifier_tokens_in: int = 0,
     classifier_tokens_out: int = 0,
     forced_fallback: bool = False,
+    template_id: str | None = None,
+    run_id: str | None = None,
+    searches_used: int | None = None,
 ) -> NoReturn:
     """Фиксирует сбой запроса и отвечает ошибкой.
 
@@ -151,6 +154,9 @@ async def fail_request(
             classifier_tokens_in=classifier_tokens_in,
             classifier_tokens_out=classifier_tokens_out,
             forced_fallback=forced_fallback,
+            template_id=template_id,
+            run_id=run_id,
+            searches_used=searches_used,
             status="error",
             error_message=error_message,
         )
@@ -199,11 +205,18 @@ async def touch_session(db: AsyncSession, session_id: int) -> None:
 # --- Генерация с принудительными tools ------------------------------------------------------
 
 
-def _check_finish(result: GenerationResult, *, tool_expected: bool) -> None:
+def _check_finish(
+    result: GenerationResult, *, tool_expected: bool, strict_finish: bool = False
+) -> None:
+    """strict_finish=True: любой обрыв по max_tokens (в том числе текстовый ответ без tools)
+    — OutputTruncated. В обычном чате (False) текстовый обрыв по-прежнему проходит, но
+    теперь оставляет предупреждение в логе."""
     if result.finish == FINISH_REFUSAL:
         raise ModelRefusal(f"refusal: {result.finish_detail}")
-    if result.finish == FINISH_MAX_TOKENS and (tool_expected or result.tool_calls):
-        raise OutputTruncated(f"max_tokens (out={result.tokens_out})")
+    if result.finish == FINISH_MAX_TOKENS:
+        if strict_finish or tool_expected or result.tool_calls:
+            raise OutputTruncated(f"max_tokens (out={result.tokens_out})")
+        logger.warning("text answer cut off by max_tokens (out=%d)", result.tokens_out)
 
 
 def _called_file_tool(result: GenerationResult) -> bool:
@@ -217,6 +230,7 @@ async def generate_with_tools(
     system: str,
     decision: RouteDecision,
     attachments: list[Attachment] | None,
+    strict_finish: bool = False,
 ) -> tuple[GenerationResult, bool]:
     """Возвращает (результат, forced_fallback). См. описание конвейера в начале модуля."""
     common = {
@@ -232,7 +246,7 @@ async def generate_with_tools(
     tool = decision.forced_tool
     if not tool:
         result = await adapter.generate(system=system, thinking=decision.thinking, **common)
-        _check_finish(result, tool_expected=False)
+        _check_finish(result, tool_expected=False, strict_finish=strict_finish)
         return result, False
 
     caps = adapter.caps
@@ -245,7 +259,7 @@ async def generate_with_tools(
         thinking=thinking,
         **common,
     )
-    _check_finish(first, tool_expected=True)
+    _check_finish(first, tool_expected=True, strict_finish=strict_finish)
     if _called_file_tool(first):
         return first, False
 
@@ -262,7 +276,7 @@ async def generate_with_tools(
     second.tokens_in += first.tokens_in
     second.tokens_out += first.tokens_out
     second.latency_ms += first.latency_ms
-    _check_finish(second, tool_expected=True)
+    _check_finish(second, tool_expected=True, strict_finish=strict_finish)
     if _called_file_tool(second):
         return second, True
     raise GenerationFailed(
@@ -433,6 +447,9 @@ async def persist_turn(
     user_attachments: list[dict],
     outcome: TurnOutcome,
     extra_notes: list[str] | None = None,
+    template_id: str | None = None,
+    run_id: str | None = None,
+    searches_used: int | None = None,
 ) -> ChatResponse:
     """Сохраняет оба сообщения, лог, обновляет сессию и собирает ответ API."""
     latency_ms = int((time.monotonic() - started) * 1000)
@@ -475,6 +492,9 @@ async def persist_turn(
             classifier_tokens_out=clf.tokens_out,
             forced_fallback=outcome.forced_fallback,
             image_model=outcome.image_model,
+            template_id=template_id,
+            run_id=run_id,
+            searches_used=searches_used,
             status="success",
             error_message="; ".join(notes)[:500] or None,
         )

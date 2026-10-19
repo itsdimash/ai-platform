@@ -1,0 +1,39 @@
+id: tender_products
+title: Тендерная ТЗ → таблица товаров
+description: Находит в тендерной документации описание товаров, делит его на позиции и подбирает по каждой реальные бренды и модели через веб-поиск
+icon: table
+allowed_roles: [pm, commercial_director, admin]
+
+files:
+  - slot: tender_docx
+    label: Тендерная документация (.docx)
+    accept: [.docx]
+    required: true
+    multiple: false
+params: []
+require_any: []
+output: table+file
+
+pipeline: tender_products
+
+limits:
+  max_items: 60
+  max_searches_per_item: 3
+  concurrency: 4
+  run_timeout_s: 1800
+  max_runs_per_user: 2
+
+# логические имена из app/router/config.yaml (claude-sonnet = Claude Sonnet 5.5)
+models:
+  default: claude-sonnet
+  split_items: claude-sonnet
+  search_brands: claude-sonnet
+max_tokens: 32000
+thinking: low
+
+settings:
+  # Вход этапа 1 длиннее порога делится на части по границам абзацев/предложений;
+  # то же происходит, если ответ оборван по max_tokens.
+  split_chunk_chars: 25000
+  split_min_chars: 3000       # ниже этого размера дальше не делим
+  stage2_max_tokens: 8000     # потолок ответа на одну позицию

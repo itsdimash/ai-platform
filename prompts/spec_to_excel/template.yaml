@@ -1,0 +1,52 @@
+id: spec_to_excel
+title: ТЗ → Excel
+description: Строки технической спецификации в ваш Excel-шаблон
+icon: file-spreadsheet
+allowed_roles: [pm, commercial_director, admin]
+
+files:
+  - slot: template_xlsx
+    label: Excel-шаблон спецификации
+    accept: [.xlsx]
+    required: true
+    multiple: false
+  - slot: items_file
+    label: Файл со списком товаров
+    accept: [.xlsx, .docx, .pdf]
+    required: false
+    multiple: false
+params:
+  - key: section
+    label: Раздел
+    type: text
+    required: false
+    max_length: 200
+  - key: items_text
+    label: Список товаров и характеристик
+    type: textarea
+    required: false
+    max_length: 60000
+require_any: [items_text, items_file]
+output: file
+
+pipeline: spec_to_excel
+
+limits:
+  max_items: 60
+  max_searches_per_item: 3
+  concurrency: 4
+  run_timeout_s: 1800
+  max_runs_per_user: 2
+
+# логические имена из app/router/config.yaml (claude-sonnet = Claude Sonnet 5.5)
+models:
+  default: claude-sonnet
+  search_links: claude-sonnet
+max_tokens: 32000
+thinking: low
+
+settings:
+  # Список делится на пачки (по абзацам, а если абзац один — по строкам); пачки идут параллельно.
+  batch_units: 12             # не больше такого числа абзацев/строк в пачке
+  batch_chars: 8000           # и не больше такого числа символов
+  max_searches_per_batch: 30  # потолок веб-поисков на одну пачку

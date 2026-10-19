@@ -19,6 +19,20 @@ class ChatTurn:
 
 
 @dataclass
+class SourceRef:
+    """Источник, найденный веб-поиском провайдера."""
+
+    url: str
+    title: str = ""
+
+
+def add_source(sources: list[SourceRef], url: str | None, title: str | None = "") -> None:
+    """Добавляет источник без дублей по url (порядок первого появления)."""
+    if url and all(s.url != url for s in sources):
+        sources.append(SourceRef(url=url, title=title or ""))
+
+
+@dataclass
 class GenerationResult:
     text: str
     tokens_in: int
@@ -36,6 +50,9 @@ class GenerationResult:
     finish: str = FINISH_STOP
     finish_detail: str | None = None  # категория отказа / сырой finish_reason — для лога
     image_model: str | None = None  # реальный id модели картинок, если создавалась картинка
+    # Источники веб-поиска и число выполненных поисков (0/пусто, если поиск не шёл).
+    sources: list[SourceRef] = field(default_factory=list)
+    searches_used: int = 0
 
 
 @dataclass
@@ -98,6 +115,8 @@ __all__ = [
     "GenerationResult",
     "ModelAdapter",
     "ModelCaps",
+    "SourceRef",
+    "add_source",
     "same_model",
     "turns_from",
 ]
@@ -125,9 +144,12 @@ class ModelAdapter(ABC):
         force_tool: str | None = None,
         thinking: str = "off",
         timeout_s: float | None = None,
+        web_search_max_uses: int | None = None,
     ) -> GenerationResult:
         """prompt= (строка) — старый путь; messages= — реплики с ролями. Вложения
         относятся к последней реплике пользователя. force_tool — имя инструмента,
         вызов которого нужно принудить (адаптер обязан поддерживать это при
-        caps.can_force_tool). thinking — абстрактный уровень off|low|medium|high|max."""
+        caps.can_force_tool). thinking — абстрактный уровень off|low|medium|high|max.
+        web_search_max_uses — потолок поисков за запрос (None — значение адаптера по умолчанию);
+        учитывается только при web_search=True."""
         raise NotImplementedError

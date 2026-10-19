@@ -14,6 +14,8 @@ from .base import (
     GenerationResult,
     ModelAdapter,
     ModelCaps,
+    SourceRef,
+    add_source,
     turns_from,
 )
 
@@ -86,9 +88,12 @@ class GeminiAdapter(ModelAdapter):
         force_tool: str | None = None,
         thinking: str = "off",
         timeout_s: float | None = None,
+        web_search_max_uses: int | None = None,
     ) -> GenerationResult:
         started = time.monotonic()
 
+        # web_search_max_uses игнорируется: у Google Search grounding нет параметра, ограничивающего
+        # число поисков за запрос (модель сама решает, сколько запросов выполнить).
         tool_list: list[types.Tool] = []
         if web_search:
             # Google Search вместе с function tools Gemini не принимает без отдельного
@@ -159,6 +164,16 @@ class GeminiAdapter(ModelAdapter):
         elif reason not in (None, "STOP"):
             detail = reason
 
+        sources: list[SourceRef] = []
+        queries: list[str] = []
+        grounding = getattr(candidate, "grounding_metadata", None) if candidate else None
+        if grounding:
+            for chunk in getattr(grounding, "grounding_chunks", None) or []:
+                web = getattr(chunk, "web", None)
+                if web:
+                    add_source(sources, getattr(web, "uri", None), getattr(web, "title", ""))
+            queries = list(getattr(grounding, "web_search_queries", None) or [])
+
         usage = response.usage_metadata
         tokens_in = (usage.prompt_token_count or 0) if usage else 0
         # Токены thinking тарифицируются как выходные.
@@ -178,6 +193,8 @@ class GeminiAdapter(ModelAdapter):
             model_used=response.model_version or self.model,
             finish=finish,
             finish_detail=detail,
+            sources=sources,
+            searches_used=len(queries),
         )
 
     @staticmethod

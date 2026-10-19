@@ -22,6 +22,7 @@ timezone: UTC
 limits:
   provider_timeout_s: 600   # таймаут вызова провайдера
   retries: 2                # ретраи SDK на 429/5xx/таймауты (с backoff)
+  template_llm_concurrency: 8   # одновременных LLM-вызовов шаблонов на весь процесс
 
 classifier:
   model: gemini-flash-lite
