@@ -64,6 +64,15 @@ async def put_bytes_async(
     await asyncio.to_thread(put_bytes, key, data, content_type, name=name)
 
 
+def get_bytes(key: str) -> bytes:
+    """Содержимое объекта целиком (вызывающий заранее проверяет размер через head_info)."""
+    return get_s3_client().get_object(Bucket=_bucket(), Key=key)["Body"].read()
+
+
+async def get_bytes_async(key: str) -> bytes:
+    return await asyncio.to_thread(get_bytes, key)
+
+
 def head_info(key: str) -> dict | None:
     """{"size", "mime", "name"} или None, если объекта нет."""
     try:

@@ -40,6 +40,11 @@ class AIRequestLog(Base):
     # Реальный id модели, создавшей изображение (если создавалось).
     image_model: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Шаблоны-запуски (templates): какой шаблон и run породили запрос; число веб-поисков.
+    template_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    run_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    searches_used: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     status: Mapped[str] = mapped_column(String(20), default="success")  # success | error
     error_message: Mapped[str | None] = mapped_column(String(500), nullable=True)
 

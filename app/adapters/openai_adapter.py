@@ -20,6 +20,8 @@ from .base import (
     GenerationResult,
     ModelAdapter,
     ModelCaps,
+    SourceRef,
+    add_source,
     turns_from,
 )
 
@@ -42,6 +44,21 @@ def resolve_reasoning_effort(abstract: str, supported: tuple[str, ...]) -> str |
         return wanted
     target = _EFFORT_ORDER.index(wanted)
     return min(supported, key=lambda e: abs(_EFFORT_ORDER.index(e) - target))
+
+
+def _web_search_info(response: Any) -> tuple[list[SourceRef], int]:
+    """Источники (аннотации url_citation в тексте ответа) и число web_search_call."""
+    sources: list[SourceRef] = []
+    searches = 0
+    for item in response.output or []:
+        if item.type == "web_search_call":
+            searches += 1
+        elif item.type == "message":
+            for part in item.content or []:
+                for ann in getattr(part, "annotations", None) or []:
+                    if getattr(ann, "type", None) == "url_citation":
+                        add_source(sources, getattr(ann, "url", None), getattr(ann, "title", ""))
+    return sources, searches
 
 
 class OpenAIAdapter(ModelAdapter):
@@ -74,6 +91,7 @@ class OpenAIAdapter(ModelAdapter):
         force_tool: str | None = None,
         thinking: str = "off",
         timeout_s: float | None = None,
+        web_search_max_uses: int | None = None,
     ) -> GenerationResult:
         started = time.monotonic()
 
@@ -108,6 +126,10 @@ class OpenAIAdapter(ModelAdapter):
             kwargs["reasoning"] = {"effort": effort}
         if json_mode:
             kwargs["text"] = {"format": {"type": "json_object"}}
+        if web_search and web_search_max_uses is not None:
+            # max_tool_calls ограничивает суммарное число вызовов встроенных tools
+            # (для запроса с одним web_search это и есть число поисков).
+            kwargs["max_tool_calls"] = web_search_max_uses
         if timeout_s:
             kwargs["timeout"] = timeout_s
 
@@ -133,6 +155,8 @@ class OpenAIAdapter(ModelAdapter):
         elif incomplete == "max_output_tokens":
             finish = FINISH_MAX_TOKENS
 
+        sources, searches_used = _web_search_info(response)
+
         usage = response.usage
         return GenerationResult(
             text=response.output_text or "",
@@ -144,6 +168,8 @@ class OpenAIAdapter(ModelAdapter):
             model_used=response.model,
             finish=finish,
             finish_detail=detail,
+            sources=sources,
+            searches_used=searches_used,
         )
 
     @staticmethod
