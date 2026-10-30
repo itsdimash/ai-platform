@@ -31,7 +31,7 @@ from reportlab.platypus import (
 )
 
 from app.utils.deck.themes import get_palette
-from app.utils.tool_schema import SECTION_SCHEMA, SUMMARY_PROP
+from app.utils.tool_schema import REVISES_PROP, SECTION_SCHEMA, SUMMARY_PROP
 
 _FONTS_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
 
@@ -48,6 +48,7 @@ PDF_TOOL = {
             "title": {"type": "string"},
             "subtitle": {"type": "string", "description": "Optional: date, author, addressee"},
             "summary": SUMMARY_PROP,
+            "revises": REVISES_PROP,
             "sections": {"type": "array", "items": SECTION_SCHEMA},
         },
         "required": ["title", "sections", "summary"],

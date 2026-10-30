@@ -1,6 +1,6 @@
 import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..adapters.base import ModelAdapter
@@ -8,7 +8,7 @@ from ..auth import CurrentUser, get_current_user
 from ..db.session import get_db
 from ..router.route import load_config
 from ..services.chat_service import get_or_create_session, persist_turn, run_turn
-from ..services.history import fetch_recent_rows
+from ..services.history import fetch_recent_rows, resolve_edit_target
 from ..utils.attachments import describe_kinds, kinds_of_records, resolve_attachment_keys
 from .deps import get_adapters
 from .schemas import ChatRequest, ChatResponse
@@ -28,6 +28,9 @@ async def chat(
     категорий), сохранение. Сбой возвращает ошибку и не попадает в историю."""
     started = time.monotonic()
 
+    if body.edit_of and body.session_id is None:
+        raise HTTPException(status_code=400, detail="Для правки файла нужен session_id")
+
     # Ключи ранее загруженных файлов проверяем ДО создания сессии и до трат на модель.
     # Только привязка: по ключам проверяется владелец и существование, текст в промпт
     # не извлекается (клиент вклеивает текст документа в prompt сам).
@@ -35,6 +38,11 @@ async def chat(
 
     session = await get_or_create_session(db, body.session_id, user.user_id, body.prompt)
     history_rows = await fetch_recent_rows(db, session.id, load_config()["history"]["max_messages"])
+    edit_target = (
+        await resolve_edit_target(db, session.id, history_rows, body.edit_of)
+        if body.edit_of
+        else None
+    )
 
     outcome = await run_turn(
         db=db,
@@ -47,6 +55,7 @@ async def chat(
         model_choice=body.model,
         history_rows=history_rows,
         attachment_kinds=describe_kinds(kinds_of_records(user_attachments)),
+        edit_target=edit_target,
     )
     return await persist_turn(
         db,

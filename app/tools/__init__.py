@@ -11,8 +11,9 @@ ToolExecutionError — роутеры чата отвечают на него 5x
 """
 
 import asyncio
+import copy
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from app.utils.deck.images import generate_deck_images
@@ -51,6 +52,12 @@ class ToolExecutionError(Exception):
 class ToolContext:
     user_id: int
     session_id: int
+    # Файлы ассистента из истории чата (от старых к новым) — нужны, чтобы понять, какую
+    # версию файла правит пользователь (поле `revises` в вызове инструмента).
+    history_attachments: list[dict] = field(default_factory=list)
+    # Файл, который пользователь явно выбрал для правки (кнопка «Изменить»): с ним не нужно
+    # угадывать версию по имени из `revises`, и он может быть старше окна истории.
+    edit_target: dict | None = None
 
 
 @dataclass
@@ -76,17 +83,77 @@ def clean_line(value: object, limit: int = _MAX_LINE) -> str:
     return text[:limit].rstrip()
 
 
-def file_reply(emoji: str, kind: str, title: str, details: str, summary: object = "") -> str:
-    """«📊 Готово! Презентация «X» — 12 слайдов. <summary>»"""
-    text = f"{emoji} Готово! {kind} «{title}» — {details}."
+def file_reply(
+    emoji: str, kind: str, title: str, details: str, summary: object = "", *, edited: bool = False
+) -> str:
+    """«📊 Готово! Презентация «X» — 12 слайдов. <summary>»; для правки — «Обновлено!»."""
+    lead = "Обновлено!" if edited else "Готово!"
+    text = f"{emoji} {lead} {kind} «{title}» — {details}."
     extra = clean_line(summary)
     return f"{text} {extra}" if extra else text
 
 
-def image_reply(caption: object = "") -> str:
-    """«🎨 Готово: <caption>»"""
+def image_reply(caption: object = "", *, edited: bool = False) -> str:
+    """«🎨 Готово: <caption>»; для правки — «Обновлено: <caption>»."""
     text = clean_line(caption)
-    return f"🎨 Готово: {text}" if text else "🎨 Готово: изображение создано."
+    lead = "Обновлено" if edited else "Готово"
+    return f"🎨 {lead}: {text}" if text else f"🎨 {lead}: изображение создано."
+
+
+def _is_mime(mime: str):
+    return lambda att: att.get("mime") == mime
+
+
+_is_deck = _is_mime(MIME_PPTX)
+_is_docx = _is_mime(MIME_DOCX)
+_is_xlsx = _is_mime(MIME_XLSX)
+_is_pdf = _is_mime(MIME_PDF)
+
+
+def _is_image(att: dict) -> bool:
+    return att.get("type") == "image"
+
+
+def resolve_previous(ctx: ToolContext, args: dict, matches) -> dict | None:
+    """Убирает `revises` из аргументов и возвращает правимый файл: выбранный пользователем
+    (ctx.edit_target) или найденный по имени из `revises`."""
+    revises = args.pop("revises", None)
+    if ctx.edit_target and matches(ctx.edit_target):
+        return ctx.edit_target
+    return previous_version(ctx, revises, matches)
+
+
+def previous_version(ctx: ToolContext, revises: object, matches) -> dict | None:
+    """Файл из истории, который правит пользователь: по точному имени из `revises`,
+    а если модель имя не угадала — самый свежий файл того же вида."""
+    wanted = clean_line(revises).casefold()
+    if not wanted:
+        return None
+    same_kind = [a for a in ctx.history_attachments if matches(a)]
+    for att in reversed(same_kind):
+        if str(att.get("name", "")).casefold() == wanted:
+            return att
+    return same_kind[-1] if same_kind else None
+
+
+def revision_of(prev: dict | None) -> int:
+    """Номер версии новой правки: исходный файл = v1, первая правка = v2."""
+    return int(prev.get("revision") or 1) + 1 if prev else 1
+
+
+_VERSION_SUFFIX = re.compile(r"\s*\(v\d+\)\s*$")
+
+
+def base_title(title: str) -> str:
+    """Название без суффикса версии, который модель могла скопировать из имени файла."""
+    return _VERSION_SUFFIX.sub("", title) or title
+
+
+def with_version(title: str, revision: int) -> str:
+    """«План» + v2 -> «План (v2)»; суффикс версии срезается, чтобы не получилось
+    «План (v2) (v3)»."""
+    title = base_title(title)
+    return f"{title} (v{revision})" if revision > 1 else title
 
 
 async def _store(ctx: ToolContext, filename: str, data: bytes, mime: str) -> dict:
@@ -104,50 +171,76 @@ async def _run_one(
     if name == "generate_presentation":
         # Нормализация и раскладка слайдов -> картинки (параллельно, с общим таймаутом) ->
         # сборка файла в потоке. Сбой картинки не ломает колоду.
+        revision = revision_of(resolve_previous(ctx, args, _is_deck))
+        spec = copy.deepcopy(args)  # до normalize: это ровно то, что прислала модель
         deck, slides = prepare_deck(args)
         images, image_model = await generate_deck_images(deck, slides)
         rendered = await asyncio.to_thread(render, deck, slides, images)
-        title = clean_line(deck.title) or "Презентация"
+        title = with_version(clean_line(deck.title) or "Презентация", revision)
         record = await _store(ctx, f"{title}.pptx", rendered.data, MIME_PPTX)
+        # Исходные данные колоды — чтобы следующая правка шла от них, а не с нуля.
+        record.update(spec=spec, revision=revision)
         count = _plural(rendered.slide_count, "слайд", "слайда", "слайдов")
-        reply = file_reply("📊", "Презентация", title, count, deck.summary)
+        reply = file_reply("📊", "Презентация", title, count, deck.summary, edited=revision > 1)
         return ToolResult(record, reply, image_model=image_model)
 
     if name == "generate_document":
-        title = clean_line(args.get("title")) or "Документ"
+        revision = revision_of(resolve_previous(ctx, args, _is_docx))
+        spec = copy.deepcopy(args)
+        title = base_title(clean_line(args.get("title"))) or "Документ"
         sections = args.get("sections") or []
         data = await asyncio.to_thread(
             build_document, title, sections, clean_line(args.get("subtitle"))
         )
-        record = await _store(ctx, f"{title}.docx", data, MIME_DOCX)
+        shown = with_version(title, revision)
+        record = await _store(ctx, f"{shown}.docx", data, MIME_DOCX)
+        record.update(spec=spec, revision=revision)
         count = _plural(len(sections), "раздел", "раздела", "разделов")
-        return ToolResult(record, file_reply("📄", "Документ", title, count, args.get("summary")))
+        reply = file_reply("📄", "Документ", shown, count, args.get("summary"), edited=revision > 1)
+        return ToolResult(record, reply)
 
     if name == "generate_spreadsheet":
-        filename = clean_line(args.get("filename")).replace("_", " ").strip() or "Таблица"
+        revision = revision_of(resolve_previous(ctx, args, _is_xlsx))
+        spec = copy.deepcopy(args)
+        filename = (
+            base_title(clean_line(args.get("filename")).replace("_", " ").strip()) or "Таблица"
+        )
         sheets = args.get("sheets") or []
         data = await asyncio.to_thread(build_spreadsheet, sheets)
-        record = await _store(ctx, f"{filename}.xlsx", data, MIME_XLSX)
+        shown = with_version(filename, revision)
+        record = await _store(ctx, f"{shown}.xlsx", data, MIME_XLSX)
+        record.update(spec=spec, revision=revision)
         rows = sum(len(s.get("rows") or []) for s in sheets)
         info = f"{_plural(len(sheets), 'лист', 'листа', 'листов')}, {_plural(rows, 'строка', 'строки', 'строк')}"
-        return ToolResult(record, file_reply("📈", "Таблица", filename, info, args.get("summary")))
+        reply = file_reply("📈", "Таблица", shown, info, args.get("summary"), edited=revision > 1)
+        return ToolResult(record, reply)
 
     if name == "generate_pdf":
-        title = clean_line(args.get("title")) or "Документ"
+        revision = revision_of(resolve_previous(ctx, args, _is_pdf))
+        spec = copy.deepcopy(args)
+        title = base_title(clean_line(args.get("title"))) or "Документ"
         sections = args.get("sections") or []
         data = await asyncio.to_thread(build_pdf, title, sections, clean_line(args.get("subtitle")))
-        record = await _store(ctx, f"{title}.pdf", data, MIME_PDF)
+        shown = with_version(title, revision)
+        record = await _store(ctx, f"{shown}.pdf", data, MIME_PDF)
+        record.update(spec=spec, revision=revision)
         count = _plural(len(sections), "раздел", "раздела", "разделов")
-        return ToolResult(record, file_reply("📕", "PDF", title, count, args.get("summary")))
+        reply = file_reply("📕", "PDF", shown, count, args.get("summary"), edited=revision > 1)
+        return ToolResult(record, reply)
 
     if name == "generate_image":
-        data, image_model = await generate_image_bytes(
-            prompt=args.get("prompt") or prompt, size=args.get("size")
-        )
+        revision = revision_of(resolve_previous(ctx, args, _is_image))
+        image_prompt = args.get("prompt") or prompt
+        data, image_model = await generate_image_bytes(prompt=image_prompt, size=args.get("size"))
         caption = clean_line(args.get("caption"))
-        base = caption[:60].rstrip(" .,;:!?…") or "image"
+        base = with_version(caption[:60].rstrip(" .,;:!?…") or "image", revision)
         record = await _store(ctx, f"{base}.png", data, MIME_PNG)
-        return ToolResult(record, image_reply(caption), image_model=image_model)
+        record.update(
+            spec={"prompt": image_prompt, "size": args.get("size") or "", "caption": caption},
+            revision=revision,
+        )
+        reply = image_reply(caption, edited=revision > 1)
+        return ToolResult(record, reply, image_model=image_model)
 
     return None
 

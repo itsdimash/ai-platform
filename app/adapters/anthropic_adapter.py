@@ -132,7 +132,12 @@ class AnthropicAdapter(ModelAdapter):
         if force_tool:
             kwargs["tool_choice"] = {"type": "tool", "name": force_tool}
         if system:
-            kwargs["system"] = system
+            # Блок system с точкой кеша: кешируется весь префикс (tools + system). Следующий
+            # запрос с теми же инструментами и промптом читает его в разы дешевле; префикс
+            # короче минимума модели Anthropic просто не кешируется, без ошибки.
+            kwargs["system"] = [
+                {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
+            ]
         thinking_param, output_config = self.thinking_params(
             thinking, max_tokens, forcing_tool=bool(force_tool)
         )
@@ -163,7 +168,15 @@ class AnthropicAdapter(ModelAdapter):
             async with stream_ctx as stream:
                 response = await stream.get_final_message()
 
-            tokens_in += response.usage.input_tokens
+            # input_tokens не включает токены, записанные в кеш / прочитанные из него:
+            # в tokens_in идёт полный размер промпта (оценка стоимости остаётся консервативной).
+            cache_read = int(getattr(response.usage, "cache_read_input_tokens", 0) or 0)
+            cache_written = int(getattr(response.usage, "cache_creation_input_tokens", 0) or 0)
+            if cache_read or cache_written:
+                logger.info(
+                    "prompt cache (%s): read=%d written=%d", self.model, cache_read, cache_written
+                )
+            tokens_in += response.usage.input_tokens + cache_read + cache_written
             tokens_out += response.usage.output_tokens
             # Текстовые блоки (особенно с цитатами web search) — куски одного текста:
             # склеиваем без разделителей.

@@ -8,6 +8,7 @@ from openai import AsyncOpenAI
 
 from app.config import get_settings
 from app.router.route import load_config
+from app.utils.tool_schema import REVISES_PROP
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ IMAGE_TOOL = {
                     "(shown to the user as the reply). No markdown."
                 ),
             },
+            "revises": REVISES_PROP,
         },
         "required": ["prompt", "caption"],
     },
