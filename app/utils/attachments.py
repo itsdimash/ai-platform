@@ -37,7 +37,12 @@ def with_urls(records: list[dict] | None) -> list[dict]:
         except (StorageNotConfiguredError, KeyError):
             logger.warning("presign failed for attachment", exc_info=True)
             url = None
-        result.append({**rec, "url": url})
+        # spec (исходные данные для правок) нужен модели, а не клиенту: в ответ отдаём только
+        # признак editable — по нему UI решает, показывать ли кнопку «Изменить».
+        public = {k: v for k, v in rec.items() if k != "spec"}
+        if isinstance(rec.get("spec"), dict):
+            public["editable"] = True
+        result.append({**public, "url": url})
     return result
 
 

@@ -552,3 +552,74 @@ def test_system_prompt_covers_language_title_slide_and_blocks():
     assert "mystery" in build_system_prompt(
         "mystery", date(2026, 1, 1)
     )  # неизвестная роль — как есть
+
+
+# --- правка выбранного файла (edit_of) ----------------------------------------------------
+
+PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+DECK_KEY = "ai/7/5/abc_Коты.pptx"
+
+
+def _with_deck_history(env):
+    from app.models.chat import ChatSession
+
+    env.db._existing = ChatSession(id=5, user_id=7, title="Коты")
+    deck = {
+        "type": "file",
+        "name": "Коты.pptx",
+        "key": DECK_KEY,
+        "mime": PPTX_MIME,
+        "size": 1,
+        "revision": 1,
+        "spec": {"title": "Коты", "slides": [{"layout": "bullets", "title": "Породы"}]},
+    }
+    env.db.history_rows = [
+        db_row("user", "презентация про котов"),
+        db_row("ai", "📊 Готово!", [deck]),
+    ]
+
+
+def test_edit_of_skips_classifier_forces_the_files_tool_and_attaches_its_data(env):
+    _with_deck_history(env)
+    # классификатор «ошибся бы» (general_qa), но при edit_of он не вызывается
+    classify_as(env, "general_qa")
+    adapters = use(env, claude_sonnet=[result(TOOL, PRES_ARGS)])
+
+    r = env.post("добавь слайд про цены", session_id=5, edit_of=DECK_KEY)
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["task_type"] == "presentation" and body["confidence"] == 1.0
+    assert body["attachments"][0]["name"] == "Коты (v2).pptx"
+    assert body["text"].startswith("📊 Обновлено!")
+    assert "spec" not in body["attachments"][0] and body["attachments"][0]["editable"] is True
+    assert "classify_args" not in env.state  # классификатор не вызывался
+
+    call = adapters["claude-sonnet"].calls[0]
+    assert call["system"].endswith(tool_hint(TOOL))  # Claude 5.5: подсказка нужного инструмента
+    last = call["messages"][-1].content
+    assert last.startswith("добавь слайд про цены")
+    assert "Пользователь правит файл «Коты.pptx»" in last and '"title":"Коты"' in last
+    # данные файла приложены к сообщению пользователя и не дублируются в истории
+    assert sum(t.content.count("Исходные данные файла") for t in call["messages"][:-1]) == 0
+    assert "Презентации (generate_presentation)" in call["system"]
+    assert "Таблицы:" not in call["system"]
+    log = env.db.of(AIRequestLog)[0]
+    assert log.classifier_tokens_in == 0 and log.status == "success"
+
+
+def test_edit_of_requires_session_and_a_file_from_that_session(env):
+    _with_deck_history(env)
+    use(env, claude_sonnet=[result(TOOL, PRES_ARGS)])
+
+    assert env.post("правка", edit_of=DECK_KEY).status_code == 400  # без session_id
+    assert env.post("правка", session_id=5, edit_of="ai/7/5/чужой.pptx").status_code == 404
+    assert env.db.of(ChatMessage) == []  # ничего не сохранено
+
+
+def test_plain_question_gets_a_short_system_prompt(env):
+    classify_as(env, "general_qa")
+    adapters = use(env, claude_sonnet=[result(text="ок")])
+    env.post("что такое валовая маржа?")
+    system = adapters["claude-sonnet"].calls[0]["system"]
+    assert "Презентации (generate_presentation)" not in system and len(system) < 3000

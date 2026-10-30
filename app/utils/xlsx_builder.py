@@ -22,7 +22,7 @@ from openpyxl.utils import get_column_letter
 
 from app.limits import MAX_XLSX_ROWS
 from app.utils.deck.themes import FONT, get_palette
-from app.utils.tool_schema import SUMMARY_PROP
+from app.utils.tool_schema import REVISES_PROP, SUMMARY_PROP
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +38,7 @@ SPREADSHEET_TOOL = {
         "properties": {
             "filename": {"type": "string", "description": "Base name without extension"},
             "summary": SUMMARY_PROP,
+            "revises": REVISES_PROP,
             "sheets": {
                 "type": "array",
                 "items": {

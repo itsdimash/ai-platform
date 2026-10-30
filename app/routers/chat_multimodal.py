@@ -57,7 +57,7 @@ from ..services.chat_service import (
     persist_turn,
     run_turn,
 )
-from ..services.history import fetch_recent_rows
+from ..services.history import fetch_recent_rows, resolve_edit_target
 from ..utils.attachments import (
     describe_kinds,
     kinds_of_records,
@@ -242,6 +242,8 @@ async def chat_multimodal(
     files: list[UploadFile] | None = File(None),
     # Ключи файлов, ранее загруженных через /v1/documents/extract (file_key).
     attachment_keys: list[str] | None = Form(None),
+    # Ключ файла ассистента из этой сессии, который правит пользователь (см. ChatRequest.edit_of).
+    edit_of: str | None = Form(None),
     user: CurrentUser = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     adapters: dict[str, ModelAdapter] = Depends(get_adapters),
@@ -250,6 +252,9 @@ async def chat_multimodal(
 
     body_model = model.strip() if model and model.strip() else None
     sid = _parse_session_id(session_id)
+    edit_key = edit_of.strip() if edit_of and edit_of.strip() else None
+    if edit_key and sid is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail="Для правки файла нужен session_id")
 
     # Как и в /v1/chat (там это 422 от схемы): лишние ключи не отбрасываем молча.
     keys = attachment_keys or []
@@ -271,6 +276,9 @@ async def chat_multimodal(
 
     session = await get_or_create_session(db, sid, user.user_id, prompt)
     history_rows = await fetch_recent_rows(db, session.id, load_config()["history"]["max_messages"])
+    edit_target = (
+        await resolve_edit_target(db, session.id, history_rows, edit_key) if edit_key else None
+    )
 
     outcome = await run_turn(
         db=db,
@@ -284,6 +292,7 @@ async def chat_multimodal(
         history_rows=history_rows,
         attachment_kinds=describe_kinds(kinds),
         prepare_input=lambda adapter: _prepare_input(adapter, images, pdfs, office_docs),
+        edit_target=edit_target,
     )
 
     # --- Исходные файлы пользователя -> R2 (ПОСЛЕ успешной генерации: упавший запрос не

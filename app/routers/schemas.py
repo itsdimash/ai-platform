@@ -14,6 +14,9 @@ class AttachmentOut(BaseModel):
     mime: str
     size: int
     url: str | None = None
+    # У файла сохранены исходные данные: его можно править (запрос с edit_of).
+    editable: bool = False
+    revision: int | None = None  # номер версии: исходный файл = 1, первая правка = 2
 
 
 class ChatRequest(BaseModel):
@@ -29,6 +32,10 @@ class ChatRequest(BaseModel):
     # file_key). Привязываются к сообщению пользователя в истории. Только
     # собственные ключи (ai/{user_id}/...), до 10 штук.
     attachment_keys: list[str] = Field(default_factory=list, max_length=10)
+    # Ключ файла ассистента из ЭТОЙ сессии (attachments[].key), который пользователь правит
+    # кнопкой «Изменить». Требует session_id. Тогда категория берётся из файла, а не из
+    # классификатора, и модель получает исходные данные файла.
+    edit_of: str | None = Field(default=None, max_length=512)
 
 
 class ChatResponse(BaseModel):

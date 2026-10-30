@@ -14,6 +14,18 @@ SUMMARY_PROP = {
     ),
 }
 
+# Правка ранее созданного файла (презентация, изображение): модель называет файл и отдаёт
+# ПОЛНОЕ обновлённое содержимое; исходные данные файла она видит в истории чата.
+REVISES_PROP = {
+    "type": "string",
+    "description": (
+        "Set ONLY when the user asks to change a file created earlier in this chat: the exact "
+        "name of that file (as in [создан файл: ...] / [создано изображение: ...]). Then pass "
+        "the FULL updated content: everything the user did not ask to change stays exactly as "
+        "in the source data from the context. Omit for a new, unrelated file."
+    ),
+}
+
 _STR = {"type": "string"}
 _STR_LIST = {"type": "array", "items": _STR}
 

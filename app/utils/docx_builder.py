@@ -15,7 +15,7 @@ from docx.oxml.ns import qn
 from docx.shared import Cm, Pt, RGBColor
 
 from app.utils.deck.themes import FONT, get_palette
-from app.utils.tool_schema import SECTION_SCHEMA, SUMMARY_PROP
+from app.utils.tool_schema import REVISES_PROP, SECTION_SCHEMA, SUMMARY_PROP
 
 DOCUMENT_TOOL = {
     "name": "generate_document",
@@ -30,6 +30,7 @@ DOCUMENT_TOOL = {
             "title": {"type": "string"},
             "subtitle": {"type": "string", "description": "Optional: date, author, addressee"},
             "summary": SUMMARY_PROP,
+            "revises": REVISES_PROP,
             "sections": {"type": "array", "items": SECTION_SCHEMA},
         },
         "required": ["title", "sections", "summary"],

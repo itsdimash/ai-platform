@@ -25,7 +25,7 @@ from app.limits import (
     MAX_SLIDES,
 )
 from app.utils.deck.themes import DEFAULT_THEME, PALETTES
-from app.utils.tool_schema import SUMMARY_PROP
+from app.utils.tool_schema import REVISES_PROP, SUMMARY_PROP
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +98,7 @@ PRESENTATION_TOOL = {
                 ),
             },
             "summary": SUMMARY_PROP,
+            "revises": REVISES_PROP,
             "slides": {
                 "type": "array",
                 "description": "Slides. The first may be layout=title, otherwise it is built from title/subtitle",

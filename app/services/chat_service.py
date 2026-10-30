@@ -44,7 +44,14 @@ from ..routers.schemas import ChatResponse
 from ..system_prompt import build_system_prompt, hard_tool_instruction, tool_hint
 from ..tools import ALL_TOOLS, ToolContext, ToolExecutionError, apply_tool_calls
 from ..utils.attachments import with_urls
-from .history import build_turns, glue_context, with_user_message
+from .history import (
+    assistant_attachments,
+    build_turns,
+    edit_block,
+    glue_context,
+    spec_info,
+    with_user_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -301,8 +308,14 @@ async def run_turn(
     history_rows: list[ChatMessage],
     attachment_kinds: str = "",
     prepare_input: PrepareFn | None = None,
+    edit_target: dict | None = None,
 ) -> TurnOutcome:
-    """Классификация -> роутинг -> генерация. Любая ошибка завершается fail_request."""
+    """Классификация -> роутинг -> генерация. Любая ошибка завершается fail_request.
+
+    edit_target — файл ассистента, который пользователь выбрал кнопкой «Изменить»
+    (resolve_edit_target уже проверил, что он из этой сессии и правится). Тогда категория
+    известна без классификатора, инструмент — тот, что создал файл, а исходные данные файла
+    прикладываются к сообщению пользователя."""
     config = load_config()
     history_cfg = config["history"]
     classifier_cfg = config["classifier"]
@@ -324,29 +337,35 @@ async def run_turn(
             error_message=f"Неизвестная модель: {model_choice!r}",
         )
 
+    edit_info = spec_info(edit_target) if edit_target else None
     context = build_turns(
         history_rows,
         max_messages=history_cfg["max_messages"],
         max_tokens=history_cfg["max_tokens_estimate"],
         chars_per_token=history_cfg["chars_per_token"],
+        exclude_spec_keys=frozenset({edit_target["key"]}) if edit_info else frozenset(),
     )
 
     # 1. Классификация — дешёвая быстрая модель. Сбой не роняет запрос: безопасный
     # дефолт general_qa с уверенностью 0.0 (роутер отправит его на сильную модель).
-    try:
-        classification = await classify(
-            user_text,
-            adapters[classifier_cfg["model"]],
-            context=context,
-            attachment_kinds=attachment_kinds,
-            max_tokens=classifier_cfg["max_tokens"],
-            timeout_s=classifier_cfg["timeout_s"],
-            max_exchanges=classifier_cfg["max_exchanges"],
-            assistant_chars=classifier_cfg["assistant_chars"],
-        )
-    except Exception:
-        logger.warning("classifier failed", exc_info=True)
-        classification = Classification("general_qa", 0.0, "classifier_call_failed")
+    # Правка выбранного файла классификатору не нужна: категория следует из самого файла.
+    if edit_info:
+        classification = Classification(edit_info.task_type, 1.0, "edit_of")
+    else:
+        try:
+            classification = await classify(
+                user_text,
+                adapters[classifier_cfg["model"]],
+                context=context,
+                attachment_kinds=attachment_kinds,
+                max_tokens=classifier_cfg["max_tokens"],
+                timeout_s=classifier_cfg["timeout_s"],
+                max_exchanges=classifier_cfg["max_exchanges"],
+                assistant_chars=classifier_cfg["assistant_chars"],
+            )
+        except Exception:
+            logger.warning("classifier failed", exc_info=True)
+            classification = Classification("general_qa", 0.0, "classifier_call_failed")
 
     # 2. Роутинг. С вложениями SQL-путь не используется: db_query -> правило general_qa.
     has_attachments = bool(attachment_kinds)
@@ -391,8 +410,14 @@ async def run_turn(
         else:
             prepared = await prepare_input(adapter) if prepare_input else PreparedInput()
             notes += prepared.notes
-            turns = with_user_message(context, user_text + prepared.prompt_suffix)
-            system = build_system_prompt(user.role, today_local())
+            edit_note = f"\n\n{edit_block(edit_target)}" if edit_target else ""
+            turns = with_user_message(context, user_text + prepared.prompt_suffix + edit_note)
+            system = build_system_prompt(
+                user.role,
+                today_local(),
+                routed_type,
+                broad=decision.used_fallback_confidence,
+            )
             result, forced_fallback = await generate_with_tools(
                 adapter,
                 turns=turns,
@@ -403,7 +428,12 @@ async def run_turn(
             # Файловые tools исполняются здесь (сбой -> ToolExecutionError -> 5xx).
             result = await apply_tool_calls(
                 result,
-                ctx=ToolContext(user_id=user.user_id, session_id=session.id),
+                ctx=ToolContext(
+                    user_id=user.user_id,
+                    session_id=session.id,
+                    history_attachments=assistant_attachments(history_rows),
+                    edit_target=edit_target,
+                ),
                 prompt=user_text,
             )
             text, tokens_in, tokens_out = result.text, result.tokens_in, result.tokens_out
