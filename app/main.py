@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import limits
 from .config import get_settings
 from .middleware import UploadSizeLimitMiddleware
-from .routers import chat, chat_multimodal, document_extract, files, history, templates
+from .routers import audio, chat, chat_multimodal, document_extract, files, history, templates
 from .templates.runner import get_run_manager
 from .templates.spec import get_registry
 
@@ -41,6 +41,7 @@ app.add_middleware(
     UploadSizeLimitMiddleware,
     limits_by_path={
         "/v1/documents/extract": limits.MAX_DOCUMENT_BYTES + limits.UPLOAD_ENVELOPE_OVERHEAD,
+        "/v1/audio/transcribe": limits.MAX_AUDIO_BYTES + limits.UPLOAD_ENVELOPE_OVERHEAD,
         "/v1/chat/multimodal": limits.MAX_TOTAL_UPLOAD_BYTES + limits.UPLOAD_ENVELOPE_OVERHEAD,
     },
 )
@@ -57,6 +58,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(audio.router, tags=["audio"])
 app.include_router(chat.router, tags=["chat"])
 app.include_router(chat_multimodal.router, tags=["chat"])
 app.include_router(history.router, tags=["history"])
