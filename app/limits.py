@@ -17,6 +17,8 @@ MAX_IMAGE_BYTES = 20 * MB
 MAX_FILES_PER_REQUEST = 10
 MAX_TOTAL_UPLOAD_BYTES = 100 * MB
 MAX_ATTACHMENT_KEYS = 10
+# Голосовая запись для транскрибации (лимит OpenAI — 25 МБ).
+MAX_AUDIO_BYTES = 25 * MB
 # multipart-обвязка + поля формы поверх самих файлов (для раннего отказа в middleware)
 UPLOAD_ENVELOPE_OVERHEAD = 2 * MB
 
